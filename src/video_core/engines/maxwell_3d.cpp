@@ -1496,9 +1496,21 @@ void Maxwell3D::FrontVerify(VideoCommon::GpuSplit& split, FrontState& fs) {
                                ? shadow_state.reg_array[method]
                                : value;
     }
+    // EDEN_NX2_MACRO_SINK sinks macro writes too: in a tracking mode their shadow RAM copies are
+    // written only when the sink is applied, so they count as done for the shadow check as well
+    // (else the check would "resynchronize" the front's shadow to older values).
+    std::array<u32, Regs::NUM_REGS> expected_shadow;
+    std::memcpy(expected_shadow.data(), shadow_state.reg_array.data(), sizeof(expected_shadow));
+    if (VideoCommon::GpuSplit::MacroSink() &&
+        (shadow_state.shadow_ram_control == Regs::ShadowRamControl::Track ||
+         shadow_state.shadow_ram_control == Regs::ShadowRamControl::TrackWithFilter)) {
+        for (const auto& [method, value] : method_sink) {
+            expected_shadow[method] = value;
+        }
+    }
     static u64 control_differences{};
     if ((fs.control != shadow_state.shadow_ram_control ||
-         fs.shadow[MAXWELL3D_REG_INDEX(shadow_ram_control)] != shadow_state.reg_array[MAXWELL3D_REG_INDEX(shadow_ram_control)] ||
+         fs.shadow[MAXWELL3D_REG_INDEX(shadow_ram_control)] != expected_shadow[MAXWELL3D_REG_INDEX(shadow_ram_control)] ||
          fs.regs[MAXWELL3D_REG_INDEX(shadow_ram_control)] != expected[MAXWELL3D_REG_INDEX(shadow_ram_control)]) &&
         control_differences < 4) {
         LOG_WARNING(HW_GPU, "Split shadow RAM control writes, front ({} total) / back ({} total):",
@@ -1528,12 +1540,12 @@ void Maxwell3D::FrontVerify(VideoCommon::GpuSplit& split, FrontState& fs) {
         fs.control = shadow_state.shadow_ram_control;
     }
     for (u32 i = 0; i < Regs::NUM_REGS; ++i) {
-        if (fs.shadow[i] != shadow_state.reg_array[i]) {
+        if (fs.shadow[i] != expected_shadow[i]) {
             if (control_differences++ < 16) {
                 LOG_WARNING(HW_GPU, "Split front shadow register {:#x}: front {:#x}, back {:#x}", i,
-                            fs.shadow[i], shadow_state.reg_array[i]);
+                            fs.shadow[i], expected_shadow[i]);
             }
-            fs.shadow[i] = shadow_state.reg_array[i];
+            fs.shadow[i] = expected_shadow[i];
         }
     }
     if ((checks & 63) == 1) {
