@@ -98,7 +98,7 @@ inline u64 Now() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 16> counters{}; ///< See Counter
+    std::array<u64, 24> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
@@ -160,8 +160,10 @@ enum class Counter : u32 {
     PredictUnknownValue, ///< Its last write has no known value (a report or reduction)
     PredictWriterAfter,  ///< Compute or copy work was sent after the release
     PredictRan,          ///< The back already ran the release
+    UboInPlaceSame,      ///< EDEN_NX2_UBO_INPLACE: small uniform buffers unchanged, nothing copied
+    UboInPlaceChanged,   ///< EDEN_NX2_UBO_INPLACE: small uniform buffers changed, copied once
 };
-static_assert(static_cast<size_t>(Counter::PredictRan) < 16, "Data::counters is too small");
+static_assert(static_cast<size_t>(Counter::UboInPlaceChanged) < 24, "Data::counters is too small");
 
 /// Device pages (4 KiB) the native MME has DMA-read since start (GPU thread only; filled only
 /// while profiling): which buffer downloads anything on the GPU thread reads back.
@@ -247,6 +249,13 @@ inline void Report(const char* thread_name = "GPU thread") {
                         per_second(Counter::PredictOtherAddress),
                         per_second(Counter::PredictUnknownValue),
                         per_second(Counter::PredictWriterAfter), per_second(Counter::PredictRan));
+    if (const u64 same = data.counters[static_cast<size_t>(Counter::UboInPlaceSame)],
+        changed = data.counters[static_cast<size_t>(Counter::UboInPlaceChanged)];
+        same != 0 || changed != 0) {
+        line += fmt::format(" | uniform buffers compared in place {:.0f} unchanged, {:.0f} changed",
+                            static_cast<double>(same) * 1e9 / window,
+                            static_cast<double>(changed) * 1e9 / window);
+    }
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
         if (data.drain_count[i] != 0) {
