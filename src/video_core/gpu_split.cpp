@@ -113,6 +113,17 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
+    static const bool switches_read = [] {
+        const auto on = [](const char* name) {
+            const char* value = std::getenv(name);
+            return value != nullptr && value[0] != '0';
+        };
+        macro_sink = on("EDEN_NX2_MACRO_SINK");
+        compute_sink = on("EDEN_NX2_COMPUTE_SINK");
+        ring_pairs = on("EDEN_NX2_RING_PAIRS");
+        return true;
+    }();
+    (void)switches_read;
     ring = std::make_unique<u64[]>(RingWords);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;

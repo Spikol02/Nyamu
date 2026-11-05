@@ -440,18 +440,11 @@ private:
     static constexpr u64 Direct = 1 << 6; ///< Method: call it even if not executable (macros)
     static constexpr u64 Sink = 1 << 7;   ///< Method: into the method sink, tagged (SinkMethod)
 
-    static inline const bool macro_sink = [] {
-        const char* value = std::getenv("EDEN_NX2_MACRO_SINK");
-        return value != nullptr && value[0] != '0';
-    }();
-    static inline const bool compute_sink = [] {
-        const char* value = std::getenv("EDEN_NX2_COMPUTE_SINK");
-        return value != nullptr && value[0] != '0';
-    }();
-    static inline const bool ring_pairs = [] {
-        const char* value = std::getenv("EDEN_NX2_RING_PAIRS");
-        return value != nullptr && value[0] != '0';
-    }();
+    // Read when the split first starts (MaybeStart), after main() applied nx2_switches.txt: a
+    // static initialiser would run before it.
+    static inline bool macro_sink{};
+    static inline bool compute_sink{};
+    static inline bool ring_pairs{};
     static constexpr u32 MaxPairs = 4096;
 
     std::unordered_map<u64, u64> async_writes; ///< Front: 16-byte slot -> ring position
