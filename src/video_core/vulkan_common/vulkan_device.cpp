@@ -32,6 +32,9 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/vulkan_common/streamline.h"
+#endif
 
 #if defined(__ANDROID__) && defined(ARCHITECTURE_arm64)
 #include <adrenotools/bcenabler.h>
@@ -400,6 +403,10 @@ std::vector<const char*> ExtensionListForVulkan(
     return output;
 }
 
+constexpr u32 NvidiaDriverVersion(u32 major, u32 minor, u32 secondary) {
+    return (major << 22) | (minor << 14) | (secondary << 6);
+}
+
 constexpr std::array<char, 8> STATIC_CACHE_MAGIC_NUMBER{'e', 'd', 'e', 'n', 's', 't', 'p', 'c'};
 constexpr u32 STATIC_CACHE_VERSION = 1;
 
@@ -743,6 +750,15 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         RemoveExtensionFeature(extensions.descriptor_buffer, features.descriptor_buffer,
                                VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
     }
+#ifdef EGLANTINE_STREAMLINE
+    // NVIDIA's DLSS needs buffer device addresses: keep the feature enabled for
+    // it, but leave Eglantine's own buffers as they are without descriptor buffers.
+    const bool dlss_wants_device_address =
+        streamline_extensions && features.buffer_device_address.bufferDeviceAddress;
+    if (!extensions.descriptor_buffer && dlss_wants_device_address) {
+        extensions.buffer_device_address = false;
+    } else
+#endif
     if (!extensions.descriptor_buffer) {
         RemoveExtensionFeature(extensions.buffer_device_address, features.buffer_device_address,
                                VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
@@ -752,9 +768,15 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     graphics_queue = logical.GetQueue(graphics_family);
     present_queue = logical.GetQueue(present_family);
-    if (has_optical_flow_queue) {
-        optical_flow_queue = logical.GetQueue(optical_flow_family);
+
+#ifdef EGLANTINE_STREAMLINE
+    if (streamline_extensions) {
+        streamline_attached =
+            Streamline::AttachDevice(instance, physical, *logical, graphics_family, dld);
+    } else if (Streamline::WantsDevice()) {
+        Streamline::Stop();
     }
+#endif
 
     VmaVulkanFunctions functions{};
     functions.vkGetInstanceProcAddr = dld.vkGetInstanceProcAddr;
@@ -809,6 +831,11 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 }
 
 Device::~Device() {
+#ifdef EGLANTINE_STREAMLINE
+    if (streamline_attached) {
+        Streamline::Stop();
+    }
+#endif
     SaveStaticPipelineCache();
     ShutdownGPULogging();
     for (auto& pools : separate_pools) {
@@ -1126,6 +1153,26 @@ bool Device::GetSuitability(bool requires_swapchain) {
         extensions.robustness_2 = false;
     }
 
+#ifdef EGLANTINE_STREAMLINE
+    // The extensions NVIDIA's DLSS asks for, where the device has them all.
+    if (Streamline::WantsDevice()) {
+        const std::vector<std::string> wanted = Streamline::DeviceExtensions();
+        // Streamline may ask for no extensions at all.
+        const bool all = std::ranges::all_of(
+            wanted, [&](const std::string& name) { return supported_extensions.contains(name); });
+        std::string names;
+        for (const std::string& name : wanted) {
+            if (all) {
+                loaded_extensions.insert(name);
+            }
+            names += (names.empty() ? "" : ", ") + name;
+        }
+        streamline_extensions = all;
+        LOG_INFO(Render_Vulkan, "NVIDIA DLSS device extensions: {} ({})",
+                 all ? "enabled" : "unavailable", names.empty() ? "none" : names);
+    }
+#endif
+
 #undef FEATURE_EXTENSION
 #undef EXTENSION
 
@@ -1349,7 +1396,7 @@ bool Device::GetSuitability(bool requires_swapchain) {
     if (extensions.vertex_input_dynamic_state) {
         const u32 version = (properties.properties.driverVersion << 3) >> 3;
         if ((driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS && version < VK_MAKE_API_VERSION(27, 20, 100, 0))
-        || (driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY && version < VK_MAKE_API_VERSION(580, 119, 02, 0))) {
+        || (driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY && properties.properties.driverVersion < NvidiaDriverVersion(580, 119, 2))) {
             LOG_WARNING(Render_Vulkan, "Disabling broken VK_EXT_vertex_input_dynamic_state");
             RemoveExtensionFeature(extensions.vertex_input_dynamic_state, features.vertex_input_dynamic_state, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
         }
@@ -1560,7 +1607,15 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_MESH_SHADER_EXTENSION_NAME);
 
     // VK_KHR_shader_quad_control
-    extensions.shader_quad_control = features.shader_quad_control.shaderQuadControl;
+    // Quad control depends on maximal reconvergence; advertise neither unless
+    // the dependency is enabled on the logical device too.
+    extensions.shader_maximal_reconvergence =
+        features.shader_maximal_reconvergence.shaderMaximalReconvergence;
+    RemoveExtensionFeatureIfUnsuitable(extensions.shader_maximal_reconvergence,
+                                       features.shader_maximal_reconvergence,
+                                       VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME);
+    extensions.shader_quad_control = features.shader_quad_control.shaderQuadControl &&
+                                     extensions.shader_maximal_reconvergence;
     RemoveExtensionFeatureIfUnsuitable(extensions.shader_quad_control, features.shader_quad_control,
                                        VK_KHR_SHADER_QUAD_CONTROL_EXTENSION_NAME);
 
@@ -1611,13 +1666,6 @@ void Device::RemoveUnsuitableExtensions() {
     extensions.synchronization2 = features.synchronization2.synchronization2;
     RemoveExtensionFeatureIfUnsuitable(extensions.synchronization2, features.synchronization2,
                                        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
-
-    // VK_NV_optical_flow (needs VK_KHR_format_feature_flags2 and VK_KHR_synchronization2, both
-    // core in Vulkan 1.3)
-    extensions.optical_flow = extensions.optical_flow && features.optical_flow.opticalFlow &&
-                              instance_version >= VK_API_VERSION_1_3;
-    RemoveExtensionFeatureIfUnsuitable(extensions.optical_flow, features.optical_flow,
-                                       VK_NV_OPTICAL_FLOW_EXTENSION_NAME);
 }
 
 void Device::SetupFamilies(VkSurfaceKHR surface) {
@@ -1654,29 +1702,6 @@ void Device::SetupFamilies(VkSurfaceKHR surface) {
     }
     if (present) {
         present_family = *present;
-    }
-
-    // VK_NV_optical_flow executes on its own queue family (VK_QUEUE_OPTICAL_FLOW_BIT_NV).
-    has_optical_flow_queue = false;
-    if (extensions.optical_flow) {
-        for (u32 index = 0; index < static_cast<u32>(queue_family_properties.size()); ++index) {
-            const VkQueueFamilyProperties& queue_family = queue_family_properties[index];
-            if (queue_family.queueCount == 0 || index == graphics_family ||
-                index == present_family) {
-                continue;
-            }
-            if (queue_family.queueFlags & VK_QUEUE_OPTICAL_FLOW_BIT_NV) {
-                optical_flow_family = index;
-                has_optical_flow_queue = true;
-                break;
-            }
-        }
-        if (has_optical_flow_queue) {
-            LOG_INFO(Render_Vulkan, "Optical flow queue family: {}", optical_flow_family);
-        } else {
-            LOG_INFO(Render_Vulkan,
-                     "VK_NV_optical_flow is available but no dedicated optical flow queue exists");
-        }
     }
 }
 
@@ -1751,7 +1776,7 @@ u64 Device::GetDeviceMemoryBudget() const {
             result += AllocatedUsage(budget.heapUsage[heap], heap_budgets[heap]);
         }
     }
-    if (is_integrated) {
+    if (is_integrated && !IsMoltenVK()) {
         // An integrated GPU's device-local heap is system memory (a Radeon 780M reported a 21 GB
         // budget): following it let the texture cache fill that much RAM before collecting, and
         // kept ASTC uncompressed. Its budget is at most the share CollectPhysicalMemoryInfo
@@ -1850,9 +1875,6 @@ std::vector<VkDeviceQueueCreateInfo> Device::GetDeviceQueueCreateInfos() const {
     static constexpr float QUEUE_PRIORITY = 1.0f;
 
     ::Common::unordered_set<u32> unique_queue_families{graphics_family, present_family};
-    if (has_optical_flow_queue) {
-        unique_queue_families.insert(optical_flow_family);
-    }
     std::vector<VkDeviceQueueCreateInfo> queue_cis;
     queue_cis.reserve(unique_queue_families.size());
 

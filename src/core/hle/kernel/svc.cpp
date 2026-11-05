@@ -7,15 +7,10 @@
 // DO NOT MODIFY IT MANUALLY
 
 #include <array>
-#include <chrono>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
-#include <exception>
-#include <mutex>
-#include <string>
 #include <type_traits>
-#include <unordered_map>
-#include <utility>
 
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
@@ -1645,7 +1640,7 @@ static void SvcWrap_GetThreadContext364(Core::System& system, std::span<uint64_t
 static void SvcWrap_WaitForAddress64(Core::System& system, std::span<uint64_t, 8> args) {
     uint64_t address = Convert<uint64_t>(GetArg64(args, 0));
     ArbitrationType arb_type = Convert<ArbitrationType>(GetArg64(args, 1));
-    int32_t value = Convert<int32_t>(GetArg64(args, 2));
+    int64_t value = Convert<int64_t>(GetArg64(args, 2));
     int64_t timeout_ns = Convert<int64_t>(GetArg64(args, 3));
     Result ret = WaitForAddress64(system, address, arb_type, value, timeout_ns);
     SetArg64(args, 0, Convert<uint64_t>(ret));
@@ -2507,136 +2502,12 @@ static void Call64(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
     default: UNREACHABLE_MSG("Unhandled SVC {:#x}!", imm);
     }
 }
-
-// EDEN_NX2_SVC_RING=1: each guest thread's last 64 SVCs, logged when that thread calls svcBreak:
-// what led up to an abort (Kirby Air Riders' job worker clearing a torn-down completion event).
-// Plain words only while recording; event names are looked up when printing.
-namespace SvcRing {
-struct Record {
-    u32 imm{};
-    u64 in[4]{};
-    u32 message[12]{}; // SendSyncRequest's TLS message
-    u32 handles[4]{};  // ClearEvent's handle, or WaitSynchronization's first handles
-    u64 out[2]{};
-    u64 tick{};
-};
-struct Ring {
-    std::array<Record, 64> records{};
-    u32 next{};
-};
-
-bool Enabled() {
-    static const bool enabled = std::getenv("EDEN_NX2_SVC_RING") != nullptr;
-    return enabled;
-}
-std::mutex& Mutex() {
-    static std::mutex mutex;
-    return mutex;
-}
-std::unordered_map<u64, Ring>& Rings() {
-    static std::unordered_map<u64, Ring> rings;
-    return rings;
-}
-
-void Print(Core::System& system, KProcess& process, u64 thread_id, const Ring& ring) {
-    auto& kernel = system.Kernel();
-    const auto name = [&](u32 handle) -> std::string {
-        if (handle == 0 || (handle & 0xffff8000U) == 0xffff8000U) return fmt::format("{:#x}", handle);
-        KScopedAutoObject event = process.GetHandleTable().GetObject<KReadableEvent>(kernel, handle);
-        if (event.IsNull()) return fmt::format("{:#x}=?", handle);
-        return fmt::format("{:#x}={}", handle,
-                           Service::KernelHelpers::DebugEventName(event.GetPointerUnsafe()));
-    };
-    LOG_INFO(Kernel_SVC, "svc ring of t{} before svcBreak (oldest first):", thread_id);
-    for (u32 i = 0; i < ring.records.size(); ++i) {
-        const Record& r = ring.records[(ring.next + i) % ring.records.size()];
-        if (r.tick == 0) continue;
-        std::string extra;
-        if (r.imm == 0x21 || r.imm == 0x22) {
-            for (const u32 word : r.message) extra += fmt::format("{:08x} ", word);
-        } else if (r.imm == 0x12 || r.imm == 0x18) {
-            for (const u32 handle : r.handles) {
-                if (handle != 0) extra += name(handle) + " ";
-            }
-        }
-        LOG_INFO(Kernel_SVC, "  @{} svc {:#04x} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} -> {:#x} {:#x} {}",
-                 r.tick, r.imm, r.in[0], r.in[1], r.in[2], r.in[3], r.out[0], r.out[1], extra);
-    }
-}
-
-Record* Enter(Core::System& system, KProcess& process, u32 imm, std::array<u64, 8>& args) {
-    if (!Enabled()) return nullptr;
-    try {
-        auto& kernel = system.Kernel();
-        const u64 thread_id = GetCurrentThread(kernel).GetThreadId();
-        std::scoped_lock lk{Mutex()};
-        Ring& ring = Rings()[thread_id];
-        if (imm == 0x26) {
-            Print(system, process, thread_id, ring);
-            // The other threads' calls of the last 200 ms: the one that queued the job and gave
-            // up waiting for it.
-            const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                                 std::chrono::steady_clock::now().time_since_epoch())
-                                                 .count());
-            for (const auto& [other_id, other] : Rings()) {
-                if (other_id == thread_id) continue;
-                Ring recent{};
-                bool any{};
-                for (const Record& r : other.records) {
-                    if (r.tick != 0 && now - r.tick < 200'000) {
-                        any = true;
-                    }
-                }
-                if (!any) continue;
-                recent = other;
-                for (Record& r : recent.records) {
-                    if (r.tick == 0 || now - r.tick >= 200'000) r.tick = 0;
-                }
-                Print(system, process, other_id, recent);
-            }
-        }
-        Record& r = ring.records[ring.next];
-        ring.next = (ring.next + 1) % ring.records.size();
-        r = Record{};
-        r.imm = imm;
-        for (u32 i = 0; i < 4; ++i) r.in[i] = args[i];
-        r.tick = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                      std::chrono::steady_clock::now().time_since_epoch())
-                                      .count());
-        auto& memory = process.GetMemory();
-        if (imm == 0x21 || imm == 0x22) {
-            const u64 tls = GetInteger(GetCurrentThread(kernel).GetTlsAddress());
-            for (u32 i = 0; i < 12; ++i) r.message[i] = memory.Read32(tls + 4 * i);
-        } else if (imm == 0x12) {
-            r.handles[0] = static_cast<u32>(args[0]);
-        } else if (imm == 0x18) {
-            const u64 count = std::min<u64>(args[2], 4);
-            for (u64 i = 0; i < count; ++i) r.handles[i] = memory.Read32(args[1] + 4 * i);
-        }
-        return &r;
-    } catch (const std::exception& e) {
-        static bool logged{};
-        if (!std::exchange(logged, true)) LOG_ERROR(Kernel_SVC, "svc ring: {}", e.what());
-    } catch (...) {
-        static bool logged{};
-        if (!std::exchange(logged, true)) LOG_ERROR(Kernel_SVC, "svc ring: unknown exception");
-    }
-    return nullptr;
-}
-
-void Leave(Record* record, const std::array<u64, 8>& args) {
-    if (record == nullptr) return;
-    std::scoped_lock lk{Mutex()};
-    record->out[0] = args[0];
-    record->out[1] = args[1];
-}
-} // namespace SvcRing
-
 void Call(Core::System& system, u32 imm) {
     auto& kernel = system.Kernel();
     auto& process = GetCurrentProcess(kernel);
     std::array<uint64_t, 8> args;
     kernel.CurrentPhysicalCore().SaveSvcArguments(process, args);
+    GetCurrentThread(kernel).SetEnteredKernel();
     //kernel.EnterSVCProfile();
     LOG_TRACE(Kernel_SVC, "{} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x} [6]={:#x}",
         imm, GetArg64(args, 0), GetArg64(args, 1), GetArg64(args, 2),
@@ -2672,7 +2543,6 @@ void Call(Core::System& system, u32 imm) {
             LOG_INFO(Kernel_SVC, "svc 0x18 t{} waits on{}", GetCurrentThread(kernel).GetThreadId(), list);
         }
     }
-    SvcRing::Record* ring_record = SvcRing::Enter(system, process, imm, args);
     if (imm == 0x80) {
         // Switch 2 only: svcSetGpuMemoryAttribute(address, size, mask, attr). nn::gpu::sdk and
         // nn::gs native memory set the new "GPU accessible" attribute (0x20) before registering
@@ -2701,12 +2571,26 @@ void Call(Core::System& system, u32 imm) {
         LOG_DEBUG(Kernel_SVC, "Switch 2 svc 0x80 addr={:#x} size={:#x} mask={:#x} attr={:#x} -> {:#x}",
                   address, size, mask, attr, result.raw);
         args[0] = result.raw;
-    } else if (process.Is64Bit()) {
-        Call64(system, imm, args);
     } else {
-        Call32(system, imm, args);
+        const std::array<uint64_t, 8> in_args = args;
+        if (process.Is64Bit()) {
+            Call64(system, imm, args);
+        } else {
+            Call32(system, imm, args);
+        }
+        // A kernel call the game asked for something this kernel does not know (a new
+        // arbitration type, info type, ...): games abort on it with 2001-0120. Name the first.
+        if (static_cast<u32>(GetArg64(args, 0)) == ResultInvalidEnumValue.raw) {
+            static std::atomic<u32> logged{};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+                LOG_ERROR(Kernel_SVC,
+                          "svc {:#04x} returned InvalidEnumValue (2001-0120): [0]={:#x} [1]={:#x} "
+                          "[2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x}",
+                          imm, in_args[0], in_args[1], in_args[2], in_args[3], in_args[4],
+                          in_args[5]);
+            }
+        }
     }
-    SvcRing::Leave(ring_record, args);
     if (svc_trace) {
         LOG_INFO(Kernel_SVC, "svc {:#04x} out t{} [0]={:#x} [1]={:#x} [2]={:#x}", imm,
                  GetCurrentThread(kernel).GetThreadId(), GetArg64(args, 0), GetArg64(args, 1),

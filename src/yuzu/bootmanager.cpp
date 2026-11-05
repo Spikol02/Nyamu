@@ -47,10 +47,6 @@
 #include <QOpenGLContext>
 #endif
 
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
-
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/settings_input.h"
@@ -122,7 +118,7 @@ struct NullRenderWidget : public RenderWidget {
 GRenderWindow::GRenderWindow(MainWindow* parent,
                              std::shared_ptr<InputCommon::InputSubsystem> input_subsystem_)
     : QWidget(parent), input_subsystem{std::move(input_subsystem_)} {
-    setWindowTitle(QStringLiteral("Eglantine %1 | %2-%3")
+    setWindowTitle(QStringLiteral("Lichii %1 | %2-%3")
                        .arg(QString::fromUtf8(Common::g_build_name),
                             QString::fromUtf8(Common::g_scm_branch),
                             QString::fromUtf8(Common::g_scm_desc)));
@@ -161,45 +157,14 @@ GRenderWindow::~GRenderWindow() {
     input_subsystem->Shutdown();
 }
 
-namespace {
-// Benchmark helpers (for repeatable TAS runs):
-// EDEN_TAS_AUTOSTART=1: start TAS playback at the first displayed frame.
-// EDEN_BENCH_LOG=<file>: one line per displayed frame, "<steady ns> <tas frame>", then "END" when
-// the TAS playback finishes.
-std::FILE* BenchLog() {
-    static std::FILE* const file = [] {
-        const char* path = std::getenv("EDEN_BENCH_LOG");
-        return path ? std::fopen(path, "w") : nullptr;
-    }();
-    return file;
-}
-} // Anonymous namespace
-
 void GRenderWindow::OnFrameDisplayed() {
     input_subsystem->GetTas()->UpdateThread();
-    const auto [new_tas_state, tas_frame, tas_lengths] = input_subsystem->GetTas()->GetStatus();
-    if (std::FILE* const bench = BenchLog()) {
-        static bool tas_started = false;
-        const auto now = std::chrono::steady_clock::now().time_since_epoch();
-        std::fprintf(bench, "%lld %zu\n",
-                     static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()),
-                     tas_frame);
-        if (new_tas_state == InputCommon::TasInput::TasState::Running) {
-            tas_started = true;
-        } else if (tas_started) {
-            std::fprintf(bench, "END\n");
-            tas_started = false;
-        }
-        std::fflush(bench);
-    }
+    const InputCommon::TasInput::TasState new_tas_state =
+        std::get<0>(input_subsystem->GetTas()->GetStatus());
 
     if (!first_frame) {
         last_tas_state = new_tas_state;
         first_frame = true;
-        if (std::getenv("EDEN_TAS_AUTOSTART") != nullptr &&
-            new_tas_state != InputCommon::TasInput::TasState::Running) {
-            input_subsystem->GetTas()->StartStop();
-        }
         emit FirstFrameDisplayed();
     }
 
@@ -898,7 +863,7 @@ bool GRenderWindow::InitializeOpenGL() {
     return true;
 #else
     QMessageBox::warning(this, tr("OpenGL not available!"),
-                         tr("Eglantine has not been compiled with OpenGL support."));
+                         tr("Lichii has not been compiled with OpenGL support."));
     return false;
 #endif
 }

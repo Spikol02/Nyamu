@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <type_traits>
 // TODO: find out which don't require stable iters
@@ -36,6 +37,7 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/engines/fermi_2d.h"
+#include "video_core/game_dlss_status.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/descriptor_table.h"
 #include "video_core/texture_cache/image_base.h"
@@ -82,17 +84,14 @@ public:
     TextureCacheChannelInfo(const TextureCacheChannelInfo& state) = delete;
     TextureCacheChannelInfo& operator=(const TextureCacheChannelInfo&) = delete;
 
-    DescriptorTable<TICEntry> graphics_image_table;
-    DescriptorTable<TSCEntry> graphics_sampler_table;
-    DescriptorTable<TICEntry> compute_image_table;
-    DescriptorTable<TSCEntry> compute_sampler_table;
+    DescriptorTable<TICEntry, ImageViewId> graphics_image_table;
+    DescriptorTable<TSCEntry, SamplerId> graphics_sampler_table;
+    DescriptorTable<TICEntry, ImageViewId> compute_image_table;
+    DescriptorTable<TSCEntry, SamplerId> compute_sampler_table;
 
     // TODO: still relies on bad iterators :(
     std::unordered_map<TICEntry, ImageViewId> image_views;
     std::unordered_map<TSCEntry, SamplerId> samplers;
-
-    ::Common::unordered_map<u32, SamplerId> sampler_ids;
-    ::Common::unordered_map<u32, ImageViewId> image_view_ids;
 
     TextureCacheGPUMap* gpu_page_table = nullptr;
     TextureCacheGPUMap* sparse_page_table = nullptr;
@@ -145,6 +144,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     std::vector<u8> astc_scan_buffer;
     u64 images_deleted{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
+    bool debug_stats{true}; ///< Collect what only the debug statistics lines use
 
     static constexpr s64 DEFAULT_EXPECTED_MEMORY = 1_GiB + 125_MiB;
     static constexpr s64 DEFAULT_CRITICAL_MEMORY = 1_GiB + 625_MiB;
@@ -164,6 +164,9 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
 
     static constexpr u32 LayerUploadMinSize = 64U << 20;
     static constexpr size_t LargeScratchCapacity = 64U << 20;
+
+    /// Splits large 2D image uploads into smaller chunks, avoiding multi-hundred MiB staging buffers.
+    bool UploadInChunks(Image& image);
 
     /// Large layered images whose refresh can decode only the layers written since the last one.
     [[nodiscard]] bool UploadsByLayer(const ImageBase& image) const noexcept;
@@ -237,6 +240,8 @@ public:
     /// Handle feedback loops during draws.
     void CheckFeedbackLoop(std::span<const ImageViewInOut> views);
 
+    [[nodiscard]] bool SamplesRenderTarget(std::span<const ImageViewInOut> views);
+
     /// Get the sampler from the graphics/compute descriptor table in the specified index
     Sampler* GetSampler(u32 index, bool compute);
 
@@ -264,8 +269,21 @@ public:
     /// UpdateRenderTargets should be called before this
     Framebuffer* GetFramebuffer();
 
+    [[nodiscard]] const RenderTargets& GetRenderTargets() const noexcept {
+        return render_targets;
+    }
+
     /// Mark images in a range as modified from the CPU
     void WriteMemory(DAddr cpu_addr, size_t size);
+
+    /// EDEN_NX2_INLINE_INVALIDATE: changes whenever an image is registered.
+    [[nodiscard]] u64 PageSerial() const noexcept {
+        return page_serial.load(std::memory_order_acquire);
+    }
+
+    /// The page serial when no image overlaps [cpu_addr, cpu_addr + size), else 0.
+    /// @pre mutex is locked
+    [[nodiscard]] u64 CleanSerial(DAddr cpu_addr, size_t size);
 
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);
@@ -284,11 +302,17 @@ public:
                    const Tegra::Engines::Fermi2D::Config& copy);
 
     /// Stand-in for a DLSS evaluation: temporal upscale of src into dst (see the runtime's
-    /// TemporalUpscale). False when the images cannot take it; the caller then blits.
+    /// TemporalUpscale). False when unsupported; the caller retains its native dispatch.
     bool TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& dst,
                          const Tegra::Engines::Fermi2D::Surface& src,
                          const Tegra::Engines::Fermi2D::Surface& motion_vectors,
-                         std::array<f32, 2> jitter, std::array<f32, 2> motion_scale);
+                         const Tegra::Texture::TICEntry* depth, std::array<f32, 2> jitter,
+                         std::array<f32, 2> motion_scale, bool use_history);
+
+    /// Health check of a game's DLSS network output (dst) against its input (src); see the
+    /// runtime's ProbeGameDlssOutput. Returns an earlier check's result when one is ready.
+    std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(
+        const Tegra::Engines::Fermi2D::Surface& dst, const Tegra::Engines::Fermi2D::Surface& src);
 
     /// Try to find a cached image view in the given CPU address
     [[nodiscard]] std::pair<ImageView*, bool> TryFindFramebufferImageView(
@@ -333,6 +357,8 @@ public:
     void PrepareImage(ImageId image_id, bool is_modification, bool invalidate);
 
     Common::SpinRecursiveMutex mutex;
+
+    std::atomic<u64> page_serial{1};
 
 private:
     /// Iterate over all page indices in a range
@@ -453,26 +479,6 @@ private:
     /// Stop tracking CPU reads and writes for image
     void UntrackImage(ImageBase& image, ImageId image_id);
 
-    /// Records a CPU write into a large 2D image page by page instead of untracking it whole.
-    /// Returns false when the image does not qualify (the caller marks it modified as usual).
-    bool MarkPartialWrite(ImageBase& image, DAddr cpu_addr, size_t size);
-
-    /// Uploads a large plain 2D image in chunks; false if it does not qualify.
-    bool UploadInChunks(Image& image);
-
-    /// Records a GPU remap of a small part of a large 2D image for a partial re-upload instead of
-    /// marking the whole image remapped (which replaces it). False if the image does not qualify.
-    bool MarkPartialRemap(ImageBase& image, Tegra::MemoryManager& memory, GPUVAddr gpu_addr,
-                          size_t size);
-
-    /// Tracks the pages of a partial write again and forgets them.
-    void RestorePartialPages(ImageBase& image);
-
-    /// Uploads the block rows the recorded pages cover. Returns false if the layout is not handled.
-    bool RefreshPartialContents(Image& image);
-
-    bool ReplaceUnwrittenSparse(ImageId image_id);
-
     /// Delete image from the cache
     void DeleteImage(ImageId image, bool immediate_delete = false);
 
@@ -544,6 +550,7 @@ private:
     u64 last_feedback_loop_serial = 0;
     u64 last_feedback_texture_serial = 0;
     bool last_feedback_loop_result = false;
+    bool feedback_depth_dirty = true;
     FramebufferId last_framebuffer_id{};
     u64 last_framebuffer_serial = 0;
 
@@ -577,6 +584,13 @@ private:
     using PendingDownload = PendingImageDownload<Image>;
 
     Common::SlotVector<Image> slot_images;
+    /// EDEN_NX2_GPU_PROFILE: images created and deleted in the current 10 s window.
+    struct ChurnStats {
+        std::chrono::steady_clock::time_point window_start{};
+        u64 created{};
+        u64 created_large{};
+        u64 deleted{};
+    } churn_stats;
     Common::SlotVector<ImageMapView> slot_map_views;
     Common::SlotVector<ImageView> slot_image_views;
     Common::SlotVector<ImageAlloc> slot_image_allocs;

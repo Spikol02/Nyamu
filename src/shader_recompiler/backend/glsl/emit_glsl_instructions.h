@@ -282,6 +282,7 @@ void EmitFPNeg64(EmitContext& ctx, IR::Inst& inst, std::string_view value);
 void EmitFPSin(EmitContext& ctx, IR::Inst& inst, std::string_view value);
 void EmitFPCos(EmitContext& ctx, IR::Inst& inst, std::string_view value);
 void EmitFPExp2(EmitContext& ctx, IR::Inst& inst, std::string_view value);
+void EmitFPTanh(EmitContext& ctx, IR::Inst& inst, std::string_view value);
 void EmitFPLog2(EmitContext& ctx, IR::Inst& inst, std::string_view value);
 void EmitFPRecip32(EmitContext& ctx, IR::Inst& inst, std::string_view value);
 void EmitFPRecip64(EmitContext& ctx, IR::Inst& inst, std::string_view value);
@@ -757,5 +758,8 @@ void EmitDPdxFine(EmitContext& ctx, IR::Inst& inst, std::string_view op_a);
 void EmitDPdyFine(EmitContext& ctx, IR::Inst& inst, std::string_view op_a);
 void EmitDPdxCoarse(EmitContext& ctx, IR::Inst& inst, std::string_view op_a);
 void EmitDPdyCoarse(EmitContext& ctx, IR::Inst& inst, std::string_view op_a);
+
+void EmitTensorMulAdd(EmitContext& ctx, IR::Inst& inst, const IR::Value& a,
+                      const IR::Value& b, const IR::Value& c);
 
 } // namespace Shader::Backend::GLSL

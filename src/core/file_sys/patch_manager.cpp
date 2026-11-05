@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <span>
 
 #include "common/assert.h"
 #include "common/hex_util.h"
@@ -43,6 +44,78 @@ constexpr u32 SINGLE_BYTE_MODULUS = 0x100;
 constexpr std::array<const char*, 14> EXEFS_FILE_NAMES{
     "main",    "main.npdm", "rtld",    "sdk",     "subsdk0", "subsdk1", "subsdk2",
     "subsdk3", "subsdk4",   "subsdk5", "subsdk6", "subsdk7", "subsdk8", "subsdk9",
+};
+
+/// What a built-in patch's write expects to replace in the unpatched module.
+enum class BuiltinCheck : u8 {
+    Word,       ///< exactly `original` (a 4-byte write)
+    BranchLink, ///< any BL instruction (a hooked call; the game's target is not fixed)
+    Zero,       ///< all zero bytes (unused space a patch puts new code in)
+};
+
+struct BuiltinWrite {
+    size_t module_offset;
+    std::span<const u8> bytes;
+    BuiltinCheck check;
+    u32 original{};
+};
+
+struct BuiltinPatch {
+    std::string_view name;
+    u64 title_id;
+    std::string_view module;
+    std::string_view build_id;
+    std::span<const BuiltinWrite> writes;
+};
+
+// Ocarina of Time (main E0F3CCFA...) takes its "dynamic resolution disabled" path, so the 3D
+// renders at full scale instead of following the GPU-time controller down to its 480p floor.
+constexpr std::array<u8, 4> OOT_MAX_RES_BYTES{0x0F, 0x02, 0x00, 0x14}; // b 0x80640c
+constexpr std::array OOT_MAX_RES_WRITES{
+    BuiltinWrite{.module_offset = 0x805BD0,
+                 .bytes = OOT_MAX_RES_BYTES,
+                 .check = BuiltinCheck::Word,
+                 .original = 0x360041E8}, // tbz w8, #0, 0x80640c
+};
+
+// Ocarina of Time's community "Dynamic-fps" exefs patch: the call that returns the frame's time
+// step goes to a function that measures the real time since the last frame (CNTVCT_EL0), so the
+// game keeps its speed when frames take longer.
+constexpr std::array<u8, 4> OOT_DYNAMIC_FPS_HOOK{0x4F, 0x7D, 0xD5, 0x94}; // bl main+0x3c46200
+constexpr std::array<u8, 120> OOT_DYNAMIC_FPS_CODE{
+    0x28, 0x18, 0x20, 0x1e, 0xca, 0x92, 0x00, 0xb0, 0x4a, 0x01, 0x38, 0x91, 0x2b, 0xe0, 0x3b,
+    0xd5, 0x4c, 0x01, 0x40, 0xf9, 0x4b, 0x01, 0x00, 0xf9, 0xcc, 0x02, 0x00, 0xb4, 0x6b, 0x01,
+    0x0c, 0xcb, 0x0d, 0xe0, 0x3b, 0xd5, 0x8e, 0x02, 0x80, 0xd2, 0xae, 0x09, 0xce, 0x9a, 0x7f,
+    0x01, 0x0e, 0xeb, 0xcb, 0x81, 0x8b, 0x9a, 0x4c, 0x05, 0x40, 0xf9, 0x4c, 0x00, 0x00, 0xb5,
+    0xec, 0x03, 0x0b, 0xaa, 0x6e, 0x01, 0x0c, 0xcb, 0x8c, 0x0d, 0x8e, 0x8b, 0x4c, 0x05, 0x00,
+    0xf9, 0x82, 0x01, 0x23, 0x9e, 0xa3, 0x01, 0x23, 0x9e, 0x42, 0x18, 0x23, 0x1e, 0x42, 0x08,
+    0x21, 0x1e, 0xc3, 0x00, 0x00, 0x1c, 0x03, 0x09, 0x23, 0x1e, 0x40, 0x20, 0x23, 0x1e, 0x4d,
+    0x00, 0x00, 0x54, 0x48, 0x40, 0x20, 0x1e, 0xc0, 0x03, 0x5f, 0xd6, 0x0a, 0xd7, 0x83, 0x3f,
+};
+constexpr std::array OOT_DYNAMIC_FPS_WRITES{
+    BuiltinWrite{.module_offset = 0x6E6CC4,
+                 .bytes = OOT_DYNAMIC_FPS_HOOK,
+                 .check = BuiltinCheck::BranchLink},
+    BuiltinWrite{.module_offset = 0x3C46200,
+                 .bytes = OOT_DYNAMIC_FPS_CODE,
+                 .check = BuiltinCheck::Zero},
+};
+
+constexpr std::array BUILTIN_PATCHES{
+    BuiltinPatch{
+        .name = "Max Resolution (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .writes = OOT_MAX_RES_WRITES,
+    },
+    BuiltinPatch{
+        .name = "Dynamic FPS (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .writes = OOT_DYNAMIC_FPS_WRITES,
+    },
 };
 
 enum class TitleVersionFormat : u8 {
@@ -460,6 +533,73 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         }
     }
 
+    const auto disabled = GetDisabledAddons();
+    for (const auto& patch : BUILTIN_PATCHES) {
+        if (patch.title_id != title_id || patch.module != name) {
+            continue;
+        }
+        if (std::find(disabled.cbegin(), disabled.cend(), patch.name) != disabled.cend()) {
+            LOG_INFO(Loader, "    - Skipping \"{}\": disabled in Add-Ons", patch.name);
+            continue;
+        }
+        if (patch.build_id != build_id) {
+            LOG_INFO(Loader, "    - Skipping \"{}\": build id {} is not {}", patch.name, build_id,
+                     patch.build_id);
+            continue;
+        }
+        // Every write must find what it expects in the unpatched module, and none may already
+        // have been changed by a user mod (the mod's patch is used then).
+        bool applicable = true;
+        for (const BuiltinWrite& write : patch.writes) {
+            const size_t offset = sizeof(Loader::NSOHeader) + write.module_offset;
+            if (nso.size() < offset + write.bytes.size() || out.size() < offset + write.bytes.size()) {
+                LOG_WARNING(Loader, "    - Skipping \"{}\": {}+{:#x} is past the module's end",
+                            patch.name, name, write.module_offset);
+                applicable = false;
+                break;
+            }
+            const u8* const original = nso.data() + offset;
+            u32 word{};
+            std::memcpy(&word, original, sizeof(word));
+            bool expected = false;
+            switch (write.check) {
+            case BuiltinCheck::Word:
+                expected = word == write.original;
+                break;
+            case BuiltinCheck::BranchLink:
+                expected = (word & 0xFC000000U) == 0x94000000U;
+                break;
+            case BuiltinCheck::Zero:
+                expected = std::all_of(original, original + write.bytes.size(),
+                                       [](u8 byte) { return byte == 0; });
+                break;
+            }
+            if (!expected) {
+                LOG_WARNING(Loader, "    - Skipping \"{}\": {}+{:#x} holds {:#010x}, not what it patches",
+                            patch.name, name, write.module_offset, word);
+                applicable = false;
+                break;
+            }
+            if (std::memcmp(out.data() + offset, original, write.bytes.size()) != 0) {
+                LOG_INFO(Loader,
+                         "    - Skipping \"{}\": a user mod already patched {}+{:#x}, the mod's "
+                         "patch is used",
+                         patch.name, name, write.module_offset);
+                applicable = false;
+                break;
+            }
+        }
+        if (!applicable) {
+            continue;
+        }
+        for (const BuiltinWrite& write : patch.writes) {
+            std::memcpy(out.data() + sizeof(Loader::NSOHeader) + write.module_offset,
+                        write.bytes.data(), write.bytes.size());
+        }
+        LOG_INFO(Loader, "    - Applying built-in patch \"{}\" ({} writes)", patch.name,
+                 patch.writes.size());
+    }
+
     if (out.size() < sizeof(Loader::NSOHeader)) {
         return nso;
     }
@@ -473,6 +613,12 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
     const auto build_id = build_id_raw.substr(0, build_id_raw.find_last_not_of('0') + 1);
 
     LOG_INFO(Loader, "Querying NSO patch existence for build_id={}, name={}", build_id, name);
+
+    if (std::ranges::any_of(BUILTIN_PATCHES, [&](const BuiltinPatch& patch) {
+            return patch.title_id == title_id && patch.module == name;
+        })) {
+        return true;
+    }
 
     const auto load_dir = GetModificationLoadRoot();
     if (load_dir == nullptr) {
@@ -1003,6 +1149,21 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
                            .title_id = title_id,
                            .source = PatchSource::Unknown});
         }
+    }
+
+    for (const auto& patch : BUILTIN_PATCHES) {
+        if (patch.title_id != title_id) {
+            continue;
+        }
+        const auto patch_disabled =
+            std::find(disabled.begin(), disabled.end(), patch.name) != disabled.end();
+        out.push_back({.enabled = !patch_disabled,
+                       .name = std::string{patch.name},
+                       .version = "IPS",
+                       .type = PatchType::Mod,
+                       .program_id = title_id,
+                       .title_id = title_id,
+                       .source = PatchSource::Unknown});
     }
 
     // DLC

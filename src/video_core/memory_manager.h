@@ -112,8 +112,11 @@ public:
      * being flushed.
      */
     void ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size) const;
-    void ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, u32 count) const;
     void WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
+
+    /// Reads `count` consecutive words as Read<u32> would (Switch 2 syncpoint shim included),
+    /// without a translation per word.
+    void ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_t count) const;
     void WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
 
     /**
@@ -155,6 +158,11 @@ public:
 
     size_t MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const;
 
+    /// Changes whenever a map or unmap changes the page table.
+    [[nodiscard]] u64 MapSerial() const {
+        return map_serial.load(std::memory_order_acquire);
+    }
+
     bool IsWithinGPUAddressRange(GPUVAddr gpu_addr) const {
         return gpu_addr < address_space_size;
     }
@@ -179,6 +187,8 @@ private:
     template <typename FuncMapped, typename FuncReserved, typename FuncUnmapped>
     inline void MemoryOperation(GPUVAddr gpu_src_addr, std::size_t size, bool is_big_page, FuncMapped&& func_mapped, FuncReserved&& func_reserved, FuncUnmapped&& func_unmapped) const;
 
+    size_t MaxContinuousRangeUncached(GPUVAddr gpu_addr, size_t size) const;
+
     void ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe) const;
     void WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe);
 
@@ -199,6 +209,7 @@ private:
         boost::container::small_vector<std::pair<std::conditional_t<is_gpu_address, GPUVAddr, DAddr>, std::size_t>, 32>& result) const;
 
     std::atomic<GPUVAddr> native_syncpoint_shim{};
+    std::atomic<u64> map_serial{};
     Core::System& system;
     MaxwellDeviceMemoryManager& memory;
 
@@ -243,6 +254,8 @@ private:
 
     bool native_tiling{};
     mutable std::mutex guard;
+    // map_serial (above) is bumped after each page table change; MaxContinuousRange answers
+    // are kept until then.
 
     static constexpr size_t continuous_bits = 64;
 

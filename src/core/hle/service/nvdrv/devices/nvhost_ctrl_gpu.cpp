@@ -218,14 +218,12 @@ void ApplyNx2Characteristics(GC& gc) {
     // Without the flag NvRm fails that call and the texture stays at GPU address 0 (title 1's
     // movie and the passes rendered into compressible pools never showed).
     gc.flags |= 1ULL << 34;
-    gc.flags |= (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43);
     // NVGPU_GPU_FLAGS_SUPPORT_REMAP: without it NvRm fails every remap (nvnMemoryPoolMapVirtual)
     // before asking the server, so title 1 never maps or unmaps its sparse texture tiles (nx2:gpu
-    // 216) and streams its terrain into unmapped sparse memory. Off by default here: it cost title 1
-    // about 15-20% on an RTX 3050. EDEN_NX2_SPARSE_REMAP=1 turns it on.
+    // 216) and streams its terrain into unmapped sparse memory. EDEN_NX2_SPARSE_REMAP=0 leaves it out.
     static const bool remap = [] {
         const char* value = std::getenv("EDEN_NX2_SPARSE_REMAP");
-        return value != nullptr && value[0] != '0';
+        return value == nullptr || value[0] != '0';
     }();
     if (remap) {
         gc.flags |= 1ULL << 35;
@@ -348,7 +346,6 @@ NvResult nvhost_ctrl_gpu::GetCharacteristics3(
         nx2_caller = true;
         g_nx2_driver = true;
         Tegra::g_nx2_ampere = true;
-        Tegra::g_nx2_program_id = system.GetApplicationProcessProgramID();
         ApplyNx2Characteristics(params.gc);
         params.gpu_characteristics_buf_size = Nx2CharacteristicsSize;
         LOG_WARNING(Service_NVDRV, "Switch 2 caller, reporting Ampere chip 0x17E");

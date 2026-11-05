@@ -283,8 +283,15 @@ private:
         if (text_log) {
             output_log += fmt::format("Log Text: {}\n", *text_log);
         }
-        LOG_DEBUG(Service_LM, "LogManager {} ({}):\n{}", NameOf(entry.severity),
-                  DestinationToString(destination), output_log);
+        // Games often say here why they are about to exit (Star Fox quit at boot with no other
+        // sign): log everything above trace level where the default log filter shows it.
+        if (entry.severity >= LogSeverity::Info) {
+            LOG_INFO(Service_LM, "LogManager {} ({}):\n{}", NameOf(entry.severity),
+                     DestinationToString(destination), output_log);
+        } else {
+            LOG_DEBUG(Service_LM, "LogManager {} ({}):\n{}", NameOf(entry.severity),
+                      DestinationToString(destination), output_log);
+        }
     }
 
     static std::string DestinationToString(LogDestination destination) {

@@ -8,19 +8,15 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdlib>
-#include <cstring>
 #include <list>
 #include <memory>
 #include <utility>
 
 #include "common/assert.h"
-#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/core.h"
 #include "core/core_timing.h"
-#include "core/hardware_properties.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
 #include "core/hle/service/nvdrv/nvdata.h"
@@ -33,31 +29,21 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/kepler_memory.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
-#include "video_core/gpu_split.h"
 #include "video_core/gpu_thread.h"
+#include "video_core/gpu_timestamp.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_frame_skip.h"
+#include "video_core/rasterizer_interface.h"
 #include "video_core/nx2.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
 namespace Tegra {
-
-namespace {
-constexpr u64 GpuClockMultiplier(Settings::GpuClock clock) {
-    switch (clock) {
-    case Settings::GpuClock::Boost:
-        return 256;
-    case Settings::GpuClock::Overclock:
-        return 512;
-    default:
-        return 1;
-    }
-}
-} // Anonymous namespace
 
 struct GPU::Impl {
     explicit Impl(Core::System& system_, bool is_async_, bool use_nvdec_)
@@ -68,7 +54,12 @@ struct GPU::Impl {
         , is_async{is_async_}
     {}
 
-    ~Impl() = default;
+    ~Impl() {
+        NotifyShutdown();
+        // Rasterizer teardown flushes commands and invalidates the bound engine's dirty flags.
+        // Keep channels, their scheduler references, and the graphics context alive until then.
+        renderer.reset();
+    }
 
     std::shared_ptr<Control::ChannelState> CreateChannel(s32 channel_id) {
         auto channel_state = std::make_shared<Tegra::Control::ChannelState>(channel_id);
@@ -119,10 +110,8 @@ struct GPU::Impl {
 
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache() {
-        gpu_thread.BeginAsyncGuestWrite();
-        SCOPE_EXIT { gpu_thread.EndAsyncGuestWrite(); };
         std::function<void(PAddr, size_t)> callback_writes([this](PAddr address, size_t size) {
-            renderer->ReadRasterizer()->OnCachedWrite(address, size);
+            renderer->ReadRasterizer()->OnCacheInvalidation(address, size);
         });
         system.GatherGPUDirtyMemory(callback_writes);
     }
@@ -137,7 +126,6 @@ struct GPU::Impl {
     template <typename Func>
     [[nodiscard]] u64 RequestSyncOperation(Func&& action) {
         std::unique_lock lck{sync_request_mutex};
-        gpu_thread.InvalidateReadbackCache();
         const u64 fence = ++last_sync_fence;
         sync_requests.emplace_back(std::forward<Func>(action));
         return fence;
@@ -166,6 +154,7 @@ struct GPU::Impl {
             auto request = std::move(sync_requests.front());
             sync_requests.pop_front();
             sync_request_mutex.unlock();
+            VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::TickWork);
             request();
             current_sync_fence.fetch_add(1, std::memory_order_release);
             sync_request_mutex.lock();
@@ -174,8 +163,8 @@ struct GPU::Impl {
     }
 
     [[nodiscard]] u64 GetTicks() const {
-        const u64 gpu_tick = system.CoreTiming().GetGPUTicks();
-        return gpu_tick / GpuClockMultiplier(Settings::values.gpu_clock.GetValue());
+        return ReadGpuTimestamp(system.CoreTiming(), g_nx2_ampere.load(std::memory_order_relaxed),
+                                Settings::values.gpu_clock.GetValue());
     }
 
     void RendererFrameEndNotify() {
@@ -219,54 +208,41 @@ struct GPU::Impl {
         gpu_thread.Run(std::move(func), is_async);
     }
 
+    void MapInOrder(std::function<void()>&& func) {
+        gpu_thread.Run(std::move(func), is_async, true);
+    }
+
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     void FlushRegion(DAddr addr, u64 size) {
         gpu_thread.FlushRegion(addr, size, is_async);
     }
 
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
-        if (gpu_thread.IsCurrentThread()) {
-            auto& split = VideoCommon::GpuSplit::Get();
-            if (split.Active()) {
-                VideoCore::RasterizerDownloadArea area{};
-                split.Defer([this, addr, size, &area] { area = OnCPURead(addr, size); });
-                split.Drain(VideoCommon::GpuSplit::DrainSite::CpuRead);
-                return area;
-            }
-        }
-        if (gpu_thread.IsCurrentThread() || VideoCommon::GpuSplit::IsBackThread()) {
-            auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
-            renderer->ReadRasterizer()->FlushRegion(
-                raster_area.start_address, raster_area.end_address - raster_area.start_address);
-            raster_area.preemtive = true;
-            raster_area.completed_generation = 0;
+        auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
+        if (raster_area.preemtive) {
             return raster_area;
         }
-        static const bool unsafe_preemptive_reads = [] {
-            const char* value = std::getenv("EDEN_NX2_UNSAFE_PREEMPTIVE_READS");
-            return value != nullptr && std::strcmp(value, "1") == 0;
-        }();
-        if (unsafe_preemptive_reads && g_nx2_ampere.load(std::memory_order_relaxed) &&
-            system.GetCurrentHostThreadID() < Core::Hardware::NUM_CPU_CORES) {
-            auto area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
-            if (area.preemtive) {
-                [[maybe_unused]] static const bool reported = [] {
-                    LOG_WARNING(HW_GPU,
-                                "Unsafe NX2 preemptive CPU read bypass active: skipping ordered completion");
-                    return true;
-                }();
-                area.completed_generation = 0;
-                return area;
-            }
+        raster_area.preemtive = true;
+        // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
+        // whether buffer data must be copied back at every fence (EDEN_NX2_BUFFER_DOWNLOADS).
+        if (static std::atomic<u64> reads{}; (reads.fetch_add(1, std::memory_order_relaxed) & 63) == 0) {
+            LOG_INFO(HW_GPU, "CPU read of GPU-written memory [{:#x}, {:#x}) ({} so far)",
+                     raster_area.start_address, raster_area.end_address,
+                     reads.load(std::memory_order_relaxed));
         }
-        return gpu_thread.ReadMemory(addr, size, is_async);
+        const u64 fence = RequestSyncOperation([this, raster_area]() {
+            // Apply collected guest writes before downloading GPU data over guest memory.
+            InvalidateGPUCache();
+            renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
+        });
+        gpu_thread.TickGPU(is_async);
+        WaitForSyncOperation(fence);
+        return raster_area;
     }
 
     /// Notify rasterizer that any caches of the specified region should be invalidated
     void InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {
         if (preserve_gpu_writes) {
-            gpu_thread.BeginAsyncGuestWrite();
-            SCOPE_EXIT { gpu_thread.EndAsyncGuestWrite(); };
             VideoCore::RasterizerInterface* rasterizer = renderer->ReadRasterizer();
             if (!rasterizer->TryCacheInvalidation(addr, size)) {
                 const u64 fence = RequestSyncOperation([rasterizer, addr, size] {
@@ -282,8 +258,6 @@ struct GPU::Impl {
     }
 
     bool OnCPUWrite(DAddr addr, u64 size) {
-        gpu_thread.BeginAsyncGuestWrite();
-        SCOPE_EXIT { gpu_thread.EndAsyncGuestWrite(); };
         return renderer->ReadRasterizer()->OnCPUWrite(addr, size);
     }
 
@@ -309,12 +283,21 @@ struct GPU::Impl {
         pending_composite_fence = RequestSyncOperation(
             [this, current_request_counter, num_fences, composite_layers = std::move(layers),
              composite_fences = std::move(fences)] {
+                // The frame ends here (at its fence, in command order): a frame the frame skip
+                // dropped is not shown, the previous one stays on screen.
+                const auto composite = [this](std::span<const Tegra::FramebufferConfig> frame_layers) {
+                    if (VideoCommon::Nx2FrameSkip::EndFrame()) {
+                        renderer->ReadRasterizer()->TickFrame();
+                        return;
+                    }
+                    renderer->Composite(frame_layers);
+                };
                 if (num_fences == 0) {
-                    renderer->Composite(composite_layers);
+                    composite(composite_layers);
                     return;
                 }
                 auto& syncpoint_manager = system.Host1x().GetSyncpointManager();
-                const auto executer = [this, current_request_counter, composite_layers]() {
+                const auto executer = [this, current_request_counter, composite_layers, composite]() {
                     {
                         std::unique_lock<std::mutex> lk(request_swap_mutex);
                         if (--request_swap_counters[current_request_counter] != 0) {
@@ -322,7 +305,7 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
-                    renderer->Composite(composite_layers);
+                    composite(composite_layers);
                 };
                 for (size_t i = 0; i < num_fences; i++) {
                     syncpoint_manager.RegisterGuestAction(composite_fences[i].id,
@@ -535,6 +518,10 @@ bool GPU::IsAsync() const {
     return impl->is_async;
 }
 
+bool GPU::HasSuspendedChannels() const {
+    return impl->scheduler.HasPendingChannelsAnyThread();
+}
+
 bool GPU::UseNvdec() const {
     return impl->use_nvdec;
 }
@@ -571,28 +558,16 @@ VideoCore::RasterizerDownloadArea GPU::OnCPURead(PAddr addr, u64 size) {
     return impl->OnCPURead(addr, size);
 }
 
-u64 GPU::ReadbackGeneration() const {
-    return impl->gpu_thread.ReadbackGeneration();
-}
-
-void GPU::InvalidateReadbackCache() {
-    impl->gpu_thread.InvalidateReadbackCache();
-}
-
-void GPU::BeginAsyncGuestWrite() {
-    impl->gpu_thread.BeginAsyncGuestWrite();
-}
-
-void GPU::EndAsyncGuestWrite() {
-    impl->gpu_thread.EndAsyncGuestWrite();
-}
-
 void GPU::FlushRegion(DAddr addr, u64 size) {
     impl->FlushRegion(addr, size);
 }
 
 void GPU::RunInOrder(std::function<void()>&& func) {
     impl->RunInOrder(std::move(func));
+}
+
+void GPU::MapInOrder(std::function<void()>&& func) {
+    impl->MapInOrder(std::move(func));
 }
 
 void GPU::InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {

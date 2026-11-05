@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
-#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <span>
@@ -31,6 +31,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
 #if defined(__clang__) && defined(NDEBUG)
@@ -55,29 +56,6 @@ using VideoCore::Surface::PixelFormatFromDepthFormat;
 using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 
 constexpr size_t NUM_STAGES = Maxwell::MaxShaderStage;
-
-// Draws that wait for the driver compile hold up the scheduler thread, which the pipeline cache's
-// GPU thread timings don't see. Only runs on that thread.
-void ReportPipelineWait(std::chrono::steady_clock::duration elapsed) {
-    static std::chrono::steady_clock::duration total{};
-    static std::chrono::steady_clock::duration longest{};
-    static u32 count{};
-    static auto window = std::chrono::steady_clock::now();
-    total += elapsed;
-    longest = (std::max)(longest, elapsed);
-    ++count;
-    const auto now = std::chrono::steady_clock::now();
-    if (now - window > std::chrono::seconds{10}) {
-        const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
-        LOG_INFO(Render_Vulkan,
-                 "Draws waiting for a pipeline build in the last 10 s: {}, {:.1f} ms total, {:.1f} ms longest",
-                 count, ms(total), ms(longest));
-        total = {};
-        longest = {};
-        count = 0;
-        window = now;
-    }
-}
 
 // The stage of a program: task and mesh programs sit in the vertex and tessellation slots.
 VkShaderStageFlagBits StageFlag(const Shader::Info& info, VkShaderStageFlagBits slot_stage) {
@@ -293,12 +271,12 @@ GraphicsPipeline::GraphicsPipeline(
     GuestDescriptorQueue& guest_descriptor_queue_, DescriptorBufferRing& descriptor_buffer_ring_,
     Common::ThreadWorker* worker_thread,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
-    const GraphicsPipelineCacheKey& key_, std::shared_ptr<const GraphicsShaderModules> modules,
+    const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
     const std::array<const Shader::Info*, NUM_STAGES>& infos)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
-      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(modules)} {
+      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -318,6 +296,61 @@ GraphicsPipeline::GraphicsPipeline(
         num_descriptor_entries += NumDescriptorEntries(*info);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
+    const auto any_written = [](const auto& descriptors) {
+        return std::ranges::any_of(descriptors, [](const auto& desc) { return desc.is_written; });
+    };
+    writes_storage = std::ranges::any_of(stage_infos, [&](const Shader::Info& info) {
+        return info.stores_global_memory || any_written(info.storage_buffers_descriptors) ||
+               any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
+    });
+    writes_images = std::ranges::any_of(stage_infos, [&](const Shader::Info& info) {
+        return any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
+    });
+    const auto block = [&](DeltaBlocker blocker) {
+        if (delta_blocker == DeltaBlocker::None) {
+            delta_blocker = blocker;
+        }
+    };
+    if (writes_images) {
+        block(DeltaBlocker::WritesImages);
+    }
+    if (IsMeshPipeline()) {
+        block(DeltaBlocker::Mesh);
+    }
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        const Shader::Info& info = stage_infos[stage];
+        u32& handles = handle_constant_buffers[stage];
+        for (const auto& desc : info.texture_buffer_descriptors) {
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
+            handles |= 1U << desc.cbuf_index;
+            if (desc.has_secondary) {
+                handles |= 1U << desc.secondary_cbuf_index;
+            }
+        }
+        for (const auto& desc : info.image_buffer_descriptors) {
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
+            handles |= 1U << desc.cbuf_index;
+        }
+        for (const auto& desc : info.texture_descriptors) {
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
+            handles |= 1U << desc.cbuf_index;
+            if (desc.has_secondary) {
+                handles |= 1U << desc.secondary_cbuf_index;
+            }
+        }
+        for (const auto& desc : info.image_descriptors) {
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
+            handles |= 1U << desc.cbuf_index;
+        }
+    }
 
     DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
     uses_push_descriptor = builder.CanUsePushDescriptor();
@@ -354,7 +387,12 @@ GraphicsPipeline::GraphicsPipeline(
         try {
             MakePipeline(render_pass);
         } catch (const vk::Exception& exception) {
-            LOG_CRITICAL(Render_Vulkan, "Graphics pipeline build failed: {}", exception.what());
+            LOG_CRITICAL(Render_Vulkan,
+                         "Graphics pipeline build failed: {} (stages: tcs={} tes={} geom={}, "
+                         "patch control points {}, device max patch size {})",
+                         exception.what(), spv_modules[1] ? 1 : 0, spv_modules[2] ? 1 : 0,
+                         spv_modules[3] ? 1 : 0, key.state.patch_control_points_minus_one.Value() + 1,
+                         device.GetMaxTessellationPatchSize());
             std::scoped_lock lock{build_mutex};
             is_built = true;
             build_condvar.notify_one();
@@ -366,6 +404,12 @@ GraphicsPipeline::GraphicsPipeline(
         if (pipeline_statistics) {
             pipeline_statistics->Collect(device, *pipeline);
         }
+        // Nothing reads the shader modules once the pipeline exists, and the driver keeps a copy
+        // of each one's SPIR-V while it lives (title 1: ~1,500 pipelines, 2-5 modules each).
+        for (vk::ShaderModule& module : spv_modules) {
+            module.reset();
+        }
+
         std::scoped_lock lock{build_mutex};
         is_built = true;
         build_condvar.notify_one();
@@ -373,12 +417,24 @@ GraphicsPipeline::GraphicsPipeline(
             shader_notify->MarkShaderComplete();
         }
     }};
+    // Before the build: it frees the modules this looks at.
+    configure_func = ConfigureFunc(spv_modules, stage_infos);
+    build_task = std::move(func);
     if (worker_thread) {
-        worker_thread->QueueWork(std::move(func));
+        worker_thread->QueueWork([this] { RunBuild(); });
     } else {
-        func();
+        RunBuild();
     }
-    configure_func = ConfigureFunc(*spv_modules, stage_infos);
+}
+
+void GraphicsPipeline::RunBuild() {
+    // A draw or dispatch that needs the pipeline builds it on the scheduler thread instead of
+    // waiting for the worker queue, which can hold hundreds of builds, to reach it.
+    if (build_claimed.exchange(true)) {
+        return;
+    }
+    build_task();
+    build_task = nullptr;
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
@@ -388,8 +444,8 @@ void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
 
 template <typename Spec>
 bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
-    boost::container::small_vector<VideoCommon::ImageViewInOut, 64> views;
-    boost::container::small_vector<VideoCommon::SamplerId, 64> samplers;
+    boost::container::small_vector<VideoCommon::ImageViewInOut, 160> views;
+    boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
     views.reserve(num_image_elements);
     samplers.reserve(num_textures);
 
@@ -410,25 +466,43 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             size_t ssbo_index{};
             for (const auto& desc : info.storage_buffers_descriptors) {
                 ASSERT(desc.count == 1);
-                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                       desc.cbuf_offset, desc.is_written);
+                buffer_cache.BindGraphicsStorageBuffer(
+                    stage, ssbo_index, desc.cbuf_index, desc.cbuf_offset, desc.is_written,
+                    desc.indirect_offset, info.native_global_bounds && !desc.rebased_writes);
                 ++ssbo_index;
             }
         }
         const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
         const auto read_handle{[&](const auto& desc, u32 index) {
-            if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&>) {
-                if (desc.handle_program != ~0U) {
-                    // Read by the shader from a storage buffer: computed for this draw.
-                    return TexturePair(VideoCommon::EvaluateTextureHandle(
-                                           info, desc.handle_program, *gpu_memory,
-                                           [&](u32 cbuf) -> GPUVAddr {
-                                               return cbuf < cbufs.size() && cbufs[cbuf].enabled
-                                                          ? cbufs[cbuf].address
-                                                          : GPUVAddr{};
-                                           }),
-                                       via_header_index);
+            if (desc.handle_program != ~0U) {
+                // Read by the shader from a storage buffer: computed for this draw.
+                const auto evaluate{[&](u64 storage_alignment) {
+                    return VideoCommon::EvaluateTextureHandle(
+                        info, desc.handle_program, *gpu_memory,
+                        [&](u32 cbuf) -> GPUVAddr {
+                            return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
+                                                                              : GPUVAddr{};
+                        },
+                        storage_alignment);
+                }};
+                const u64 storage_alignment{device.GetStorageBufferAlignment()};
+                const u32 raw{evaluate(VideoCommon::HandleAlignEnabled() ? storage_alignment : 1)};
+                if (raw == 0) [[unlikely]] {
+                    // Logged once per shader and program (up to 64): which read gives a handle.
+                    static std::mutex logged_mutex;
+                    static std::vector<std::pair<u64, u32>> logged;
+                    const std::pair key_program{key.unique_hashes[stage + 1], desc.handle_program};
+                    std::scoped_lock lock{logged_mutex};
+                    if (logged.size() < 64 && std::ranges::find(logged, key_program) == logged.end()) {
+                        logged.push_back(key_program);
+                        LOG_INFO(Render_Vulkan,
+                                 "Texture handle program {} of stage {} (shader {:016x}) gave 0; "
+                                 "aligned to {} it gives {:#x}, unaligned {:#x}",
+                                 desc.handle_program, stage, key_program.first, storage_alignment,
+                                 evaluate(storage_alignment), evaluate(1));
+                    }
                 }
+                return TexturePair(raw, via_header_index);
             }
             ASSERT(cbufs[desc.cbuf_index].enabled);
             const u32 index_offset{index << desc.size_shift};
@@ -438,7 +512,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                           std::is_same_v<decltype(desc), const Shader::TextureBufferDescriptor&>) {
                 if (desc.has_secondary) {
                     ASSERT(cbufs[desc.secondary_cbuf_index].enabled);
-                    const u32 second_offset{desc.secondary_cbuf_offset + index_offset};
+                    const u32 second_offset{desc.secondary_cbuf_offset};
                     const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].address +
                                                  second_offset};
                     const u32 lhs_raw{gpu_memory->Read<u32>(addr) << desc.shift_left};
@@ -512,50 +586,93 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
     }
+    static const bool record_sampled = [] {
+        const char* const value = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED");
+        return value && *value != '\0' && *value != '0';
+    }();
+    if (record_sampled) {
+        sampled_images.clear();
+        size_t view_index{};
+        for (size_t stage = 0; stage < Spec::enabled_stages.size(); ++stage) {
+            if (!Spec::enabled_stages[stage]) {
+                continue;
+            }
+            const Shader::Info& info{stage_infos[stage]};
+            if constexpr (Spec::has_texture_buffers) {
+                view_index += Shader::NumDescriptors(info.texture_buffer_descriptors);
+            }
+            if constexpr (Spec::has_image_buffers) {
+                view_index += Shader::NumDescriptors(info.image_buffer_descriptors);
+            }
+            const u32 textures = Shader::NumDescriptors(info.texture_descriptors);
+            for (u32 texture = 0; texture < textures; ++texture, ++view_index) {
+                sampled_images.push_back(
+                    {static_cast<u32>(stage), views[view_index].index, views[view_index].id});
+            }
+            if constexpr (Spec::has_images) {
+                view_index += Shader::NumDescriptors(info.image_descriptors);
+            }
+        }
+    }
+    if (delta_blocker == DeltaBlocker::None && VideoCommon::Nx2FastDraw::g_delta_enabled) {
+        const auto same_view = [](const VideoCommon::ImageViewInOut& lhs,
+                                  const VideoCommon::ImageViewInOut& rhs) {
+            return lhs.index == rhs.index && lhs.id == rhs.id;
+        };
+        if (std::exchange(verify_delta, false)) {
+            delta_mismatch = !delta_views_valid ||
+                             !std::ranges::equal(views, delta_views, same_view) ||
+                             !std::ranges::equal(samplers, delta_samplers);
+        }
+        delta_views.assign(views.begin(), views.end());
+        delta_samplers.assign(samplers.begin(), samplers.end());
+        configured_stages = Spec::enabled_stages;
+        delta_views_valid = true;
+    }
 
-    VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
-    const auto bind_stage_info{[&](size_t stage) LAMBDA_FORCEINLINE {
-        size_t index{};
-        const auto add_buffer{[&](const auto& desc) {
-            constexpr bool is_image = std::is_same_v<decltype(desc), const ImageBufferDescriptor&>;
-            for (u32 i = 0; i < desc.count; ++i) {
-                bool is_written{false};
-                if constexpr (is_image) {
-                    is_written = desc.is_written;
-                }
-                ImageView& image_view{texture_cache.GetImageView(texture_buffer_it->id)};
-                PixelFormat format{image_view.format};
-                if constexpr (is_image) {
-                    if (const auto explicit_format{PixelFormatFromImageFormat(desc.format)}) {
-                        format = *explicit_format;
+    if constexpr (Spec::has_texture_buffers || Spec::has_image_buffers) {
+        VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
+        const auto bind_stage_info{[&](size_t stage) LAMBDA_FORCEINLINE {
+            size_t index{};
+            const auto add_buffer{[&](const auto& desc) {
+                constexpr bool is_image = std::is_same_v<decltype(desc), const ImageBufferDescriptor&>;
+                for (u32 i = 0; i < desc.count; ++i) {
+                    bool is_written{false};
+                    if constexpr (is_image) {
+                        is_written = desc.is_written;
                     }
+                    ImageView& image_view{texture_cache.GetImageView(texture_buffer_it->id)};
+                    PixelFormat format{image_view.format};
+                    if constexpr (is_image) {
+                        if (const auto explicit_format{PixelFormatFromImageFormat(desc.format)}) {
+                            format = *explicit_format;
+                        }
+                    }
+                    buffer_cache.BindGraphicsTextureBuffer(stage, index, image_view.GpuAddr(),
+                                                           image_view.BufferSize(), format,
+                                                           is_written, is_image);
+                    ++index;
+                    ++texture_buffer_it;
                 }
-                buffer_cache.BindGraphicsTextureBuffer(stage, index, image_view.GpuAddr(),
-                                                       image_view.BufferSize(), format,
-                                                       is_written, is_image);
-                ++index;
-                ++texture_buffer_it;
+            }};
+            buffer_cache.UnbindGraphicsTextureBuffers(stage);
+
+            const Shader::Info& info{stage_infos[stage]};
+            if constexpr (Spec::has_texture_buffers) {
+                for (const auto& desc : info.texture_buffer_descriptors) {
+                    add_buffer(desc);
+                }
+            }
+            if constexpr (Spec::has_image_buffers) {
+                for (const auto& desc : info.image_buffer_descriptors) {
+                    add_buffer(desc);
+                }
+            }
+            texture_buffer_it += Shader::NumDescriptors(info.texture_descriptors);
+            if constexpr (Spec::has_images) {
+                texture_buffer_it += Shader::NumDescriptors(info.image_descriptors);
             }
         }};
-        buffer_cache.UnbindGraphicsTextureBuffers(stage);
-
-        const Shader::Info& info{stage_infos[stage]};
-        if constexpr (Spec::has_texture_buffers) {
-            for (const auto& desc : info.texture_buffer_descriptors) {
-                add_buffer(desc);
-            }
-        }
-        if constexpr (Spec::has_image_buffers) {
-            for (const auto& desc : info.image_buffer_descriptors) {
-                add_buffer(desc);
-            }
-        }
-        texture_buffer_it += Shader::NumDescriptors(info.texture_descriptors);
-        if constexpr (Spec::has_images) {
-            texture_buffer_it += Shader::NumDescriptors(info.image_descriptors);
-        }
-    }};
-    {
         Profile::Scope scope{Profile::Zone::TextureBuffers};
         if constexpr (Spec::enabled_stages[0]) {
             bind_stage_info(0);
@@ -571,6 +688,22 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         if constexpr (Spec::enabled_stages[4]) {
             bind_stage_info(4);
+        }
+    } else {
+        if constexpr (Spec::enabled_stages[0]) {
+            buffer_cache.UnbindGraphicsTextureBuffers(0);
+        }
+        if constexpr (Spec::enabled_stages[1]) {
+            buffer_cache.UnbindGraphicsTextureBuffers(1);
+        }
+        if constexpr (Spec::enabled_stages[2]) {
+            buffer_cache.UnbindGraphicsTextureBuffers(2);
+        }
+        if constexpr (Spec::enabled_stages[3]) {
+            buffer_cache.UnbindGraphicsTextureBuffers(3);
+        }
+        if constexpr (Spec::enabled_stages[4]) {
+            buffer_cache.UnbindGraphicsTextureBuffers(4);
         }
     }
 
@@ -635,8 +768,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     {
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
-        texture_cache.CheckFeedbackLoop(
-            std::span<const VideoCommon::ImageViewInOut>{views.data(), views.size()});
+        const std::span<const VideoCommon::ImageViewInOut> view_span{views.data(), views.size()};
+        texture_cache.CheckFeedbackLoop(view_span);
+        if (scheduler.TakeFragmentBarrier() &&
+            (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
+            scheduler.RequestOutsideRenderPassOperationContext();
+        }
     }
     if (IsBuilt() && !pipeline) {
         return false;
@@ -645,8 +782,88 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     return ConfigureDraw(rescaling, render_area);
 }
 
+GraphicsPipeline::DeltaResult GraphicsPipeline::ConfigureDelta() {
+    namespace Profile = VideoCommon::Nx2Profile;
+    {
+        Profile::Scope scope{Profile::Zone::ReadHandles};
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            const auto& descriptors = stage_infos[stage].storage_buffers_descriptors;
+            if (!configured_stages[stage] || descriptors.empty()) {
+                continue;
+            }
+            buffer_cache.UnbindGraphicsStorageBuffers(stage);
+            size_t ssbo_index{};
+            for (const auto& desc : descriptors) {
+                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                       desc.cbuf_offset, desc.is_written);
+                ++ssbo_index;
+            }
+        }
+    }
+    {
+        Profile::Scope scope{Profile::Zone::UpdateBuffers};
+        if (!buffer_cache.UpdateGraphicsStageBuffers()) {
+            return DeltaResult::NeedsFull;
+        }
+    }
+    {
+        Profile::Scope scope{Profile::Zone::DescriptorAcquire};
+        guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
+    }
+    const auto& regs{maxwell3d->regs};
+    RescalingPushConstant rescaling;
+    RenderAreaPushConstant render_area;
+    const VideoCommon::SamplerId* samplers_it{delta_samplers.data()};
+    const VideoCommon::ImageViewInOut* views_it{delta_views.data()};
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        if (!configured_stages[stage]) {
+            continue;
+        }
+        {
+            Profile::Scope scope{Profile::Zone::BindStageBuffers};
+            buffer_cache.BindHostStageBuffers(stage);
+        }
+        {
+            Profile::Scope scope{Profile::Zone::PushDescriptors};
+            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
+                                 rescaling, samplers_it, views_it);
+        }
+        if (stage_infos[stage].uses_render_area) {
+            render_area.uses_render_area = true;
+            const u32 clip_width = regs.surface_clip.width, clip_height = regs.surface_clip.height;
+            const bool clip_set = clip_width != 0 && clip_height != 0;
+            render_area.words = {static_cast<float>(clip_set ? clip_width : u32{regs.rt[0].width}),
+                                 static_cast<float>(clip_set ? clip_height : u32{regs.rt[0].height})};
+        }
+    }
+    if (buffer_cache.any_buffer_uploaded) {
+        buffer_cache.runtime.PostCopyBarrier();
+        buffer_cache.any_buffer_uploaded = false;
+    }
+    {
+        Profile::Scope scope{Profile::Zone::RenderTargets};
+        texture_cache.UpdateRenderTargets(false);
+        const std::span<const VideoCommon::ImageViewInOut> view_span{delta_views};
+        texture_cache.CheckFeedbackLoop(view_span);
+        if (scheduler.TakeFragmentBarrier() &&
+            (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
+            scheduler.RequestOutsideRenderPassOperationContext();
+        }
+    }
+    if (IsBuilt() && !pipeline) {
+        return DeltaResult::Failed;
+    }
+    Profile::Scope scope{Profile::Zone::ConfigureDraw};
+    return ConfigureDraw(rescaling, render_area) ? DeltaResult::Configured : DeltaResult::Failed;
+}
+
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                      const RenderAreaPushConstant& render_area) {
+    if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
+        LOG_CRITICAL(Render_Vulkan, "Graphics descriptor count mismatch: expected {}, got {}",
+                     num_descriptor_entries, guest_descriptor_queue.UpdateCount());
+        return false;
+    }
     const void* const descriptor_data{guest_descriptor_queue.UpdateData()};
 
     VkDeviceSize descriptor_buffer_offset{};
@@ -680,17 +897,19 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     }
 
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    if (writes_storage) {
+        scheduler.NoteRenderPassStores();
+    }
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
-            const auto begin = std::chrono::steady_clock::now();
+            RunBuild();
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
-            ReportPipelineWait(std::chrono::steady_clock::now() - begin);
         });
     }
     const bool is_rescaling{texture_cache.IsRescaling()};
-    const bool update_rescaling{scheduler.UpdateRescaling(is_rescaling)};
+    const bool update_rescaling{scheduler.UpdateRescaling(is_rescaling, IsMeshPipeline())};
     const bool bind_pipeline{scheduler.UpdateGraphicsPipeline(this)};
     const bool bind_descriptor_buffer{
         descriptor_set_layout && uses_descriptor_buffer &&
@@ -730,20 +949,22 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             }
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
         }
-        cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS,
-                             RESCALING_LAYOUT_WORDS_OFFSET, sizeof(rescaling_data),
-                             rescaling_data.data());
+        const VkShaderStageFlags push_stages =
+            IsMeshPipeline() ? VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_TASK_BIT_EXT |
+                                   VK_SHADER_STAGE_MESH_BIT_EXT
+                             : VK_SHADER_STAGE_ALL_GRAPHICS;
+        cmdbuf.PushConstants(*pipeline_layout, push_stages, RESCALING_LAYOUT_WORDS_OFFSET,
+                             sizeof(rescaling_data), rescaling_data.data());
         if (update_rescaling) {
             const f32 config_down_factor{Settings::values.resolution_info.down_factor};
             const f32 scale_down_factor{is_rescaling ? config_down_factor : 1.0f};
-            cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS,
+            cmdbuf.PushConstants(*pipeline_layout, push_stages,
                                  RESCALING_LAYOUT_DOWN_FACTOR_OFFSET, sizeof(scale_down_factor),
                                  &scale_down_factor);
         }
         if (uses_render_area) {
-            cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS,
-                                 RENDERAREA_LAYOUT_OFFSET, sizeof(render_area_data),
-                                 &render_area_data);
+            cmdbuf.PushConstants(*pipeline_layout, push_stages, RENDERAREA_LAYOUT_OFFSET,
+                                 sizeof(render_area_data), &render_area_data);
         }
         if (!descriptor_set_layout) {
             return;
@@ -767,6 +988,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
 }
 
 void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
+    if (IsMeshPipeline() && !device.IsExtMeshShaderSupported()) {
+        return;
+    }
     FixedPipelineState::DynamicState dynamic{};
     if (!key.state.extended_dynamic_state) {
         dynamic = key.state.dynamic_state;
@@ -828,7 +1052,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     if (!vertex_binding_divisors.empty()) {
         vertex_input_ci.pNext = &input_divisor_ci;
     }
-    const bool has_tess_stages = (*spv_modules)[1] || (*spv_modules)[2];
+    const bool has_tess_stages = spv_modules[1] || spv_modules[2];
     auto input_assembly_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
     if (input_assembly_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
         if (!has_tess_stages) {
@@ -865,7 +1089,8 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .patchControlPoints = key.state.patch_control_points_minus_one.Value() + 1,
+        .patchControlPoints = std::min(key.state.patch_control_points_minus_one.Value() + 1,
+                                       device.GetMaxTessellationPatchSize()),
     };
     std::array<VkViewportSwizzleNV, Maxwell::NumViewports> swizzles;
     std::ranges::transform(key.state.viewport_swizzles, swizzles.begin(), UnpackViewportSwizzle);
@@ -1150,7 +1375,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     };
     static_vector<VkPipelineShaderStageCreateInfo, 5> shader_stages;
     for (size_t stage = 0; stage < Maxwell::MaxShaderStage; ++stage) {
-        if (!(*spv_modules)[stage]) {
+        if (!spv_modules[stage]) {
             continue;
         }
         [[maybe_unused]] auto& stage_ci =
@@ -1160,7 +1385,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 .flags = 0,
                 .stage = StageFlag(stage_infos[stage],
                                    MaxwellToVK::ShaderStage(Shader::StageFromIndex(stage))),
-                .module = *(*spv_modules)[stage],
+                .module = *spv_modules[stage],
                 .pName = "main",
                 .pSpecializationInfo = nullptr,
             });

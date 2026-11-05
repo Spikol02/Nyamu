@@ -22,7 +22,6 @@
 #endif
 
 #include <array>
-#include <cstdlib>
 #include <cstring>
 
 #include "common/assert.h"
@@ -105,7 +104,7 @@ void ProtectMemory(const void* base, size_t size, bool is_executable) {
 }
 #endif
 
-HostFeature DetectHostFeatures() {
+static const HostFeature features = []() {
     HostFeature f{};
 #ifdef DYNARMIC_ENABLE_CPU_FEATURE_DETECTION
     using Cpu = Xbyak::util::Cpu;
@@ -115,20 +114,13 @@ HostFeature DetectHostFeatures() {
     if (cpu_info.has(Cpu::tSSE42)) f |= HostFeature::SSE42;
     if (cpu_info.has(Cpu::tAVX)) f |= HostFeature::AVX;
     if (cpu_info.has(Cpu::tAVX2)) f |= HostFeature::AVX2;
-    // AVX-512 paths stay off unless EDEN_NX2_AVX512=1: Zen 4 players crashed in Mario Kart World
-    // seconds after boot by jumping to garbage, and one of these paths already miscompiled
-    // (VectorCountLeadingZeros16). Without them the JIT emits the AVX2 code every other tested CPU
-    // runs. Read when the first JIT starts, after nx2_switches.txt.
-    const char* avx512 = std::getenv("EDEN_NX2_AVX512");
-    if (avx512 != nullptr && avx512[0] == '1') {
-        if (cpu_info.has(Cpu::tAVX512F)) f |= HostFeature::AVX512F;
-        if (cpu_info.has(Cpu::tAVX512CD)) f |= HostFeature::AVX512CD;
-        if (cpu_info.has(Cpu::tAVX512VL)) f |= HostFeature::AVX512VL;
-        if (cpu_info.has(Cpu::tAVX512BW)) f |= HostFeature::AVX512BW;
-        if (cpu_info.has(Cpu::tAVX512DQ)) f |= HostFeature::AVX512DQ;
-        if (cpu_info.has(Cpu::tAVX512_BITALG)) f |= HostFeature::AVX512BITALG;
-        if (cpu_info.has(Cpu::tAVX512VBMI)) f |= HostFeature::AVX512VBMI;
-    }
+    if (cpu_info.has(Cpu::tAVX512F)) f |= HostFeature::AVX512F;
+    if (cpu_info.has(Cpu::tAVX512CD)) f |= HostFeature::AVX512CD;
+    if (cpu_info.has(Cpu::tAVX512VL)) f |= HostFeature::AVX512VL;
+    if (cpu_info.has(Cpu::tAVX512BW)) f |= HostFeature::AVX512BW;
+    if (cpu_info.has(Cpu::tAVX512DQ)) f |= HostFeature::AVX512DQ;
+    if (cpu_info.has(Cpu::tAVX512_BITALG)) f |= HostFeature::AVX512BITALG;
+    if (cpu_info.has(Cpu::tAVX512VBMI)) f |= HostFeature::AVX512VBMI;
     if (cpu_info.has(Cpu::tPCLMULQDQ)) f |= HostFeature::PCLMULQDQ;
     if (cpu_info.has(Cpu::tF16C)) f |= HostFeature::F16C;
     if (cpu_info.has(Cpu::tFMA)) f |= HostFeature::FMA;
@@ -158,9 +150,8 @@ HostFeature DetectHostFeatures() {
     }
     return f;
 #endif
-}
+}();
 HostFeature GetHostFeatures() {
-    static const HostFeature features = DetectHostFeatures();
     return features;
 }
 
@@ -245,18 +236,12 @@ void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {
     if (committed_size < size_ + codesize) {
         // The code space is only reserved (CodeAllocator), so everything up to the end of the next
         // emission has to be committed; in steps, as each VirtualAlloc call is a kernel call.
-        const size_t new_committed_size =
-            std::min<size_t>(maxSize_, (std::max)(committed_size + COMMIT_STEP, size_ + codesize));
+        committed_size = std::min<size_t>(maxSize_, (std::max)(committed_size + COMMIT_STEP, size_ + codesize));
 #    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
-        void* const memory = VirtualAlloc(top_, new_committed_size, MEM_COMMIT, PAGE_READWRITE);
+        VirtualAlloc(top_, committed_size, MEM_COMMIT, PAGE_READWRITE);
 #    else
-        void* const memory = VirtualAlloc(top_, new_committed_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+        VirtualAlloc(top_, committed_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 #    endif
-        if (!memory) {
-            using Xbyak::Error;
-            XBYAK_THROW(Xbyak::ERR_CANT_ALLOC);
-        }
-        committed_size = new_committed_size;
     }
 #endif
 }

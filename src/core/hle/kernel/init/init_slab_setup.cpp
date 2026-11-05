@@ -127,10 +127,10 @@ KVirtualAddress InitializeSlabHeap(Core::System& system, KMemoryLayout& memory_l
 
     if (size > 0) {
         const auto physical_address = TranslateSlabAddrToPhysical(memory_layout, start);
+        // Guest memory is committed as it is used (deferred backing).
         system.DeviceMemory().buffer.MarkUsed(
             GetInteger(physical_address) - Core::DramMemoryMap::Base, size);
-        void* backing_kernel_memory{system.DeviceMemory().GetPointer<void>(
-            physical_address)};
+        void* backing_kernel_memory{system.DeviceMemory().GetPointer<void>(physical_address)};
 
         const KMemoryRegion* region = memory_layout.FindVirtual(start + size - 1);
         ASSERT(region != nullptr);

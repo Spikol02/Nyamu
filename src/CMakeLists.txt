@@ -56,6 +56,11 @@ endif()
 
 add_compile_definitions(BUILD_ID="${BUILD_ID}")
 
+# windows.h's min/max macros break std::min/std::max under clang-cl too, not only MSVC.
+if (WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 # Set compilation flags
 if (MSVC AND NOT CXX_CLANG)
     set(CMAKE_CONFIGURATION_TYPES Debug Release CACHE STRING "" FORCE)

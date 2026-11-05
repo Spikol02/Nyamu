@@ -222,10 +222,11 @@ public:
             if (first >= bit.size()) {
                 return bit.size();
             }
-            if (!std::is_constant_evaluated()) {
-                // Called for every scheduling decision, on every core.
-                const u64 rest = u64(bit.to_ullong()) >> first;
-                return rest != 0 ? first + size_t(std::countr_zero(rest)) : bit.size();
+            if constexpr (N <= 64) {
+                if (!std::is_constant_evaluated()) {
+                    const u64 remaining = bit.to_ullong() >> first;
+                    return remaining != 0 ? first + size_t(std::countr_zero(remaining)) : bit.size();
+                }
             }
             for (size_t i = first; i < bit.size(); i++)
                 if (bit[i])

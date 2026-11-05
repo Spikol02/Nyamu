@@ -6,6 +6,12 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 #include <fmt/ranges.h>
@@ -17,9 +23,13 @@
 #include "common/cityhash.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/exception.h"
+#include "shader_recompiler/frontend/ampere/trap_guards.h"
 #include "shader_recompiler/object_pool.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/nx2_fast_draw.h"
+#include "video_core/dlss_contract.h"
+#include "video_core/fire_emblem_upscale.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
@@ -33,6 +43,17 @@ namespace VideoCommon {
 void ShaderCache::InvalidateRegion(VAddr addr, size_t size) {
     std::scoped_lock lock{invalidation_mutex};
     InvalidatePagesInRegion(addr, size);
+    RemovePendingShaders();
+}
+
+void ShaderCache::InvalidateRegions(std::span<const std::pair<DAddr, size_t>> sequences) {
+    if (sequences.empty()) {
+        return;
+    }
+    std::scoped_lock lock{invalidation_mutex};
+    for (const auto& [addr, size] : sequences) {
+        InvalidatePagesInRegion(addr, size);
+    }
     RemovePendingShaders();
 }
 
@@ -130,6 +151,36 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                     LOG_ERROR(HW_GPU, "Rejected program {:#x} is bound to stage {}: header {:08x}, slot {:08x}",
                               shader_addr, index, fmt::join(header, " "), fmt::join(config, " "));
                 }
+                if (native && std::getenv("EDEN_NX2_SHADER_DUMP")) {
+                    for (size_t next = index + 1; next < unique_hashes.size(); ++next) {
+                        const auto next_program =
+                            static_cast<Tegra::Engines::Maxwell3D::Regs::ShaderType>(next);
+                        if (!maxwell3d->regs.IsShaderConfigEnabled(next) ||
+                            (mesh && next_program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry) ||
+                            (!maxwell3d->regs.rasterize_enable &&
+                             next_program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Pixel)) {
+                            continue;
+                        }
+                        const auto& next_config = maxwell3d->regs.pipelines[next];
+                        const GPUVAddr next_address =
+                            (static_cast<u64>(next_config.reserved[0] & 0xff) << 32) |
+                            next_config.reserved[1];
+                        if (!gpu_memory->IsFullyMappedRange(next_address, 128)) {
+                            LOG_WARNING(HW_GPU, "Downstream native stage {} at {:#x} is unmapped",
+                                        next, next_address);
+                            continue;
+                        }
+                        try {
+                            GraphicsEnvironment capture{*maxwell3d, *gpu_memory, next_program,
+                                                        next_address, 0};
+                            LOG_INFO(HW_GPU, "Preflighted downstream native stage {} at {:#x}",
+                                     next, next_address);
+                        } catch (const std::exception& error) {
+                            LOG_ERROR(HW_GPU, "Downstream native stage {} at {:#x} rejected: {}",
+                                      next, next_address, error.what());
+                        }
+                    }
+                }
                 throw;
             }
         }
@@ -180,17 +231,40 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         LOG_ERROR(HW_GPU, "Invalid GPU address for shader {:#016x}", shader_addr);
         return nullptr;
     }
-    if (const ShaderInfo* const shader = TryGet(*cpu_shader_addr)) {
-        return shader;
+    const ShaderInfo* shader = TryGet(*cpu_shader_addr);
+    if (shader) {
+        if (shader->lowered_native &&
+            !Shader::Ampere::VerifyTrapGuards(shader->lowered_native->trap_prefix,
+                                             [&](u32 bank, u32 offset) {
+                                                 return ReadNativeGuardConstant(
+                                                     *kepler_compute, *gpu_memory, bank, offset);
+                                             }))
+            throw Shader::Ampere::TrapGuardError{};
+    } else {
+        try {
+            RethrowIfRejected(*cpu_shader_addr);
+            ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
+            shader = MakeShaderInfo(env, *cpu_shader_addr);
+        } catch (const Shader::Ampere::TrapGuardError&) {
+            // Constants can become valid on the next dispatch; do not cache this rejection.
+            throw;
+        } catch (const Shader::Exception&) {
+            RememberRejection(*cpu_shader_addr);
+            throw;
+        }
     }
-    try {
-        RethrowIfRejected(*cpu_shader_addr);
-        ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
-        return MakeShaderInfo(env, *cpu_shader_addr);
-    } catch (const Shader::Exception&) {
-        RememberRejection(*cpu_shader_addr);
-        throw;
+    // Check both warm and cold shader paths, before selecting a disk-cached pipeline.
+    // EDEN_NX2_DLSS_REPLACEMENT=native retains the native network for comparisons.
+    if (kepler_compute->IsNativeMode() && shader->lowered_native &&
+        DlssContract::IsFastFusionCandidate(program_id,
+                                            shader->lowered_native->native_program_key)) {
+        kepler_compute->TraceDlssContract(shader->lowered_native->native_program_key);
     }
+    if (kepler_compute->IsNativeMode() && shader->lowered_native &&
+        kepler_compute->ProcessGameDlss(program_id, shader->lowered_native->native_program_key)) {
+        throw FireEmblemUpscale::DispatchReplaced{};
+    }
+    return shader;
 }
 
 void ShaderCache::RethrowIfRejected(VAddr addr) {
@@ -212,6 +286,7 @@ void ShaderCache::RememberRejection(VAddr addr) {
                           std::memory_order_relaxed);
     rejected_highest.store((std::max)(rejected_highest.load(std::memory_order_relaxed), addr),
                            std::memory_order_relaxed);
+    page_serial.fetch_add(1, std::memory_order_release);
 }
 
 void ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
@@ -259,8 +334,29 @@ void ShaderCache::Register(std::unique_ptr<ShaderInfo> data, VAddr addr, size_t 
     }
 
     storage.push_back(std::move(data));
+    page_serial.fetch_add(1, std::memory_order_release);
 
     device_memory.UpdatePagesCachedCount(addr, size, 1);
+}
+
+u64 ShaderCache::CleanSerial(VAddr addr, size_t size) {
+    std::scoped_lock lock{invalidation_mutex};
+    const VAddr addr_end = addr + size;
+    if (addr_end > rejected_lowest.load(std::memory_order_relaxed) &&
+        addr <= rejected_highest.load(std::memory_order_relaxed)) {
+        return 0;
+    }
+    const u64 page_end = (addr_end + YUZU_PAGESIZE - 1) >> YUZU_PAGEBITS;
+    for (u64 page = addr >> YUZU_PAGEBITS; page < page_end; ++page) {
+        const auto it = invalidation_cache.find(page);
+        if (it != invalidation_cache.end() &&
+            std::ranges::any_of(it->second, [&](const Entry* entry) {
+                return entry->Overlaps(addr, addr_end);
+            })) {
+            return 0;
+        }
+    }
+    return page_serial.load(std::memory_order_relaxed);
 }
 
 void ShaderCache::InvalidatePagesInRegion(VAddr addr, size_t size) {
@@ -302,12 +398,21 @@ void ShaderCache::RemovePendingShaders() {
         lookup_cache.erase(it);
     }
     marked_for_removal.clear();
+    removal_pending.store(false, std::memory_order_release);
 
     if (!removed_shaders.empty()) {
-        // Remove the given shaders from the cache
-        std::erase_if(storage, [&removed_shaders](const std::unique_ptr<ShaderInfo>& shader) {
-            return std::ranges::find(removed_shaders, shader.get()) != removed_shaders.end();
-        });
+        Nx2FastDraw::Break(Nx2FastDraw::Reason::Invalidation);
+        if (removed_shaders.size() > 16) {
+            std::ranges::sort(removed_shaders, std::less<ShaderInfo*>{});
+            std::erase_if(storage, [&removed_shaders](const std::unique_ptr<ShaderInfo>& shader) {
+                return std::binary_search(removed_shaders.begin(), removed_shaders.end(),
+                                          shader.get(), std::less<ShaderInfo*>{});
+            });
+        } else {
+            std::erase_if(storage, [&removed_shaders](const std::unique_ptr<ShaderInfo>& shader) {
+                return std::ranges::find(removed_shaders, shader.get()) != removed_shaders.end();
+            });
+        }
     }
 }
 
@@ -323,6 +428,7 @@ void ShaderCache::InvalidatePageEntries(std::vector<Entry*>& entries, VAddr addr
         UnmarkMemory(entry);
         RemoveEntryFromInvalidationCache(entry);
         marked_for_removal.push_back(entry);
+        removal_pending.store(true, std::memory_order_release);
     }
 }
 
@@ -372,6 +478,15 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
         info->size_bytes = env.ReadSizeBytes();
     }
     info->lowered_native = env.LoweredNative();
+    // EDEN_NX2_SHADER_DUMP: hash_map.txt pairs each program's pipeline hash (what the frame dump
+    // and the pipeline logs name) with its address (what the dumped native program is named by).
+    if (static const char* const dump_directory = std::getenv("EDEN_NX2_SHADER_DUMP");
+        dump_directory != nullptr && info->lowered_native) {
+        static std::mutex map_mutex;
+        std::scoped_lock lock{map_mutex};
+        std::ofstream map{std::filesystem::path{dump_directory} / "hash_map.txt", std::ios::app};
+        map << fmt::format("{:016x} {:x}\n", info->unique_hash, env.ProgramBase());
+    }
     const size_t size_bytes{env.SourceSizeBytes() ? env.SourceSizeBytes() : info->size_bytes};
     const ShaderInfo* const result{info.get()};
     Register(std::move(info), cpu_addr, size_bytes);

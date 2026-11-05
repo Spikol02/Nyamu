@@ -74,6 +74,8 @@ add_executable(yuzu
     configuration/configure_general.ui
     configuration/configure_graphics.cpp
     configuration/configure_graphics.h
+    configuration/nvidia_dlss_panel.cpp
+    configuration/nvidia_dlss_panel.h
     configuration/configure_graphics.ui
     configuration/configure_graphics_advanced.cpp
     configuration/configure_graphics_advanced.h
@@ -213,12 +215,15 @@ add_executable(yuzu
     util/url_request_interceptor.h
     util/util.cpp
     util/util.h
+    util/icon_search.cpp
+    util/icon_search.h
 
     user_data_migration.h user_data_migration.cpp
 
     yuzu.qrc
     yuzu.rc
     migration_dialog.h migration_dialog.cpp
+    nup_dialogs.h nup_dialogs.cpp
     migration_worker.h migration_worker.cpp
     libqt_common.h libqt_common.cpp
 
@@ -239,9 +244,22 @@ add_executable(yuzu
     game/carousel.h game/carousel.cpp
 )
 
-set_target_properties(yuzu PROPERTIES OUTPUT_NAME "eglantine")
+set_target_properties(yuzu PROPERTIES OUTPUT_NAME "selevet")
 
-add_custom_command(TARGET yuzu PRE_BUILD
+# Threads made without an explicit size (the shader workers among them) get the executable's
+# stack reserve. 1 MiB overflowed in the SSA pass on FAST Fusion's largest shaders; reserving
+# more costs address space only, pages are committed as a stack grows.
+if (WIN32)
+    if (MSVC OR CXX_CLANG)
+        target_link_options(yuzu PRIVATE "/STACK:16777216")
+    else()
+        target_link_options(yuzu PRIVATE "-Wl,--stack,16777216")
+    endif()
+endif()
+
+# Shipped next to the executable: the NX2 switches a GUI launch cannot set another way. Read at
+# startup (LoadNx2Switches in main.cpp); a user copy in %APPDATA%\eden overrides it.
+add_custom_command(TARGET yuzu POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/dist/nx2_switches.txt" "$<TARGET_FILE_DIR:yuzu>/nx2_switches.txt"
     VERBATIM)
@@ -365,20 +383,15 @@ target_sources(yuzu
 if (APPLE)
     target_sources(yuzu PRIVATE util/macos_sleep.cpp util/macos_sleep.h)
 
-    # Xcode will automatically generate the Assets.car and icns file for us.
+    # Use the supplied Lichii artwork for all macOS generators.
     set(_dist "${CMAKE_SOURCE_DIR}/dist")
+    set(_icons "${_dist}/lichii.icns")
     if (CMAKE_GENERATOR MATCHES "Xcode")
-        set(_icons "${_dist}/eglantine.icon")
-
-        set_target_properties(eden PROPERTIES
-            XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME eglantine
-            MACOSX_BUNDLE_ICON_FILE eglantine
+        set_target_properties(yuzu PROPERTIES
+            MACOSX_BUNDLE_ICON_FILE lichii.icns
             # Also force xcode to manage signing for us.
             XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED ON
             XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED ON)
-    # Otherwise, we'll use our own.
-    else()
-        set(_icons "${_dist}/eglantine.icns" "${_dist}/Assets.car")
     endif()
 
     set_source_files_properties(${_icons} PROPERTIES
@@ -398,18 +411,21 @@ if (APPLE)
     target_sources(yuzu PRIVATE ${MOLTENVK_LIBRARY})
 elseif(WIN32)
     # compile as a win32 gui application instead of a console application
-    set_target_properties(yuzu PROPERTIES WIN32_EXECUTABLE TRUE)
     target_link_libraries(yuzu PRIVATE Qt6::EntryPointPrivate)
     if(MSVC)
         target_link_libraries(yuzu PRIVATE version.lib)
+        set_target_properties(yuzu PROPERTIES LINK_FLAGS_RELEASE "/SUBSYSTEM:WINDOWS")
     elseif(MINGW)
+        set_target_properties(yuzu PROPERTIES LINK_FLAGS_RELEASE "-Wl,--subsystem,windows")
         target_link_libraries(yuzu PRIVATE dwmapi)
     endif()
 endif()
 
 target_link_libraries(yuzu PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(yuzu PRIVATE common core input_common frontend_common network video_core qt_common)
-target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent)
+target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent Qt6::Network)
+# Unpacks NVIDIA's files from the Streamline release (nvidia_dlss_panel.cpp).
+target_link_libraries(yuzu PRIVATE ZLIB::ZLIB)
 target_link_libraries(yuzu PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (ENABLE_OPENGL)
     target_link_libraries(yuzu PRIVATE glad)

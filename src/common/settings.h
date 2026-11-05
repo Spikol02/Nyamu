@@ -332,8 +332,8 @@ struct Values {
     SwitchableSetting<bool> cpuopt_unsafe_fastmem_check{
                                                         linkage, true, "cpuopt_unsafe_fastmem_check", Category::CpuUnsafe};
     // Off by default: with Unsafe accuracy (the default) the guest's exclusive pairs then lost
-    // their cross-thread checks, and Kirby Air Riders' lock-free job queue ran a torn-down job
-    // and aborted (2162-0001) at random after its movies stopped.
+    // their cross-thread checks; Kirby Air Riders' lock-free job queue aborted at random and
+    // Star Fox hung or quit at boot.
     SwitchableSetting<bool> cpuopt_unsafe_ignore_global_monitor{
                                                                 linkage, false, "cpuopt_unsafe_ignore_global_monitor", Category::CpuUnsafe};
 
@@ -367,6 +367,10 @@ struct Values {
                                                     Specialization::Default,
                                                     true,
                                                     true};
+    // A Switch 2 game's own DLSS network (translated) in place of AMD FSR 3.1, where it runs and
+    // its output passes the checks.
+    SwitchableSetting<bool> game_dlss_network{linkage, false, "game_dlss_network",
+                                              Category::Renderer};
     SwitchableSetting<int, true> fsr_sharpening_slider{linkage,
 #ifdef __ANDROID__
                                                        0,
@@ -381,6 +385,8 @@ struct Values {
                                                            Specialization::Percentage,
                                                        true,
                                                        true};
+    // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
+    SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -390,7 +396,7 @@ struct Values {
                                                       true};
 
     SwitchableSetting<AntiAliasing> anti_aliasing{linkage,
-                                                  AntiAliasing::None,
+                                                  AntiAliasing::Fxaa,
                                                   "anti_aliasing",
                                                   Category::Renderer,
                                                   Specialization::Default,
@@ -535,8 +541,10 @@ struct Values {
                                                       true,
                                                       true};
 
+    // Default, as build 67 has it: with Balanced the GPU thread split (EDEN_NX2_SPLIT) stalled
+    // Mario Kart World and Kirby Air Riders as they loaded.
     SwitchableSetting<GpuFenceBehavior, true> gpu_fence_behavior{linkage,
-                                                                 GpuFenceBehavior::Balanced,
+                                                                 GpuFenceBehavior::Default,
                                                                  GpuFenceBehavior::Default,
                                                                  GpuFenceBehavior::Accurate,
                                                                  "gpu_fence_behavior",
@@ -606,6 +614,11 @@ struct Values {
 
     SwitchableSetting<bool> use_video_framerate{linkage, false, "use_video_framerate",
                                                 Category::RendererAdvanced};
+
+    // Mario Kart World: select a fixed or dynamic in-game frame-rate mode (loader/nso.cpp).
+    SwitchableSetting<bool> mkw_30fps{linkage, false, "mkw_30fps", Category::RendererAdvanced};
+    SwitchableSetting<bool> mkw_dynamic_fps{linkage, false, "mkw_dynamic_fps",
+                                            Category::RendererAdvanced};
 
     SwitchableSetting<bool> use_reactive_flushing{linkage,
 #ifdef __ANDROID__
@@ -772,11 +785,7 @@ struct Values {
     Setting<s32> current_user{linkage, 0, "current_user", Category::System};
 
     SwitchableSetting<ConsoleMode> use_docked_mode{linkage,
-#ifdef __ANDROID__
                                                    ConsoleMode::Handheld,
-#else
-                                                   ConsoleMode::Handheld,
-#endif
                                                    "use_docked_mode",
                                                    Category::System,
                                                    Specialization::Radio,

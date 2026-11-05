@@ -18,7 +18,6 @@
 #include <queue>
 
 #include "common/common_types.h"
-#include "common/scope_exit.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -26,6 +25,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -89,8 +89,6 @@ public:
         auto [should_flush, committed_flushes] = CommitCacheFlushes();
         if (!delay_fence && committed_flushes == 0 && SkipEmptyFence()) {
             Nx2Profile::Scope skipped_scope{Nx2Profile::Zone::FenceSkipped};
-            gpu.BeginAsyncGuestWrite();
-            SCOPE_EXIT { gpu.EndAsyncGuestWrite(); };
             func();
             rasterizer.InvalidateGPUCache();
             return;
@@ -113,8 +111,6 @@ public:
         pending_flushes.push_back(committed_flushes);
         QueueFence(new_fence);
         if (!delay_fence) {
-            gpu.BeginAsyncGuestWrite();
-            SCOPE_EXIT { gpu.EndAsyncGuestWrite(); };
             func();
         }
         fences.push(std::move(new_fence));
@@ -139,6 +135,27 @@ public:
         syncpoint_manager.IncrementGuest(value);
         std::function<void()> func([this, value] { syncpoint_manager.IncrementHost(value); });
         SignalFence(std::move(func));
+    }
+
+    /// Signals a fence and blocks until it has popped, with the operations queued before it
+    /// (the query writes among them), at any accuracy: WaitPendingFences returns at once when
+    /// fences aren't delayed, because SignalFence then runs its function immediately.
+    void SignalAndWait() {
+        std::mutex wait_mutex;
+        std::condition_variable wait_cv;
+        bool finished{};
+        SyncOperation([&] {
+            std::scoped_lock lk(wait_mutex);
+            finished = true;
+            wait_cv.notify_all();
+        });
+        SignalFence([] {});
+        rasterizer.FlushCommands();
+        if constexpr (!can_async_check) {
+            TryReleasePendingFences<true>();
+        }
+        std::unique_lock lk(wait_mutex);
+        wait_cv.wait(lk, [&finished] { return finished; });
     }
 
     void WaitPendingFences([[maybe_unused]] bool force) {
@@ -212,8 +229,6 @@ private:
                     return;
                 }
             }
-            gpu.BeginAsyncGuestWrite();
-            SCOPE_EXIT { gpu.EndAsyncGuestWrite(); };
             PopAsyncFlushes(pending_flushes.front());
             pending_flushes.pop_front();
             auto operations = std::move(pending_operations.front());
@@ -276,8 +291,9 @@ private:
                     take_front();
                 }
             }
-            gpu.BeginAsyncGuestWrite();
-            SCOPE_EXIT { gpu.EndAsyncGuestWrite(); };
+            if (!batch.empty()) {
+                VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
+            }
             size_t texture_pops = 0;
             size_t buffer_pops = 0;
             for (const Released& released : batch) {
@@ -302,6 +318,9 @@ private:
                 for (auto& operation : released.operations) {
                     operation();
                 }
+            }
+            if (!batch.empty()) {
+                VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
             }
             {
                 std::unique_lock lock(ring_guard);

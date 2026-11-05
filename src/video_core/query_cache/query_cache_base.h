@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -62,6 +63,21 @@ public:
                            [this](QueryLocation location) { InvalidateQuery(location); });
     }
 
+    /// EDEN_NX2_INLINE_INVALIDATE: changes whenever a query is cached.
+    [[nodiscard]] u64 PageSerial() const noexcept {
+        return page_serial.load(std::memory_order_acquire);
+    }
+
+    /// The page serial when no cached query is in [addr, addr + size), else 0.
+    [[nodiscard]] u64 CleanSerial(VAddr addr, std::size_t size) {
+        bool touched = false;
+        IterateCache<false>(addr, size, [&touched](QueryLocation) {
+            touched = true;
+            return true;
+        });
+        return touched ? 0 : page_serial.load(std::memory_order_relaxed);
+    }
+
     void FlushRegion(VAddr addr, std::size_t size) {
         bool result = false;
         IterateCache<false>(addr, size, [this, &result](QueryLocation location) {
@@ -103,11 +119,6 @@ public:
     void NotifyWFI();
 
     bool AccelerateHostConditionalRendering();
-
-    /// The payload of the newest semaphore release to cpu_addr that the GPU processed but whose
-    /// guest write still waits for the host GPU to finish the work before it (fences, and every
-    /// release in accurate GPU mode).
-    std::optional<u32> PendingRelease(DAddr cpu_addr);
 
     // Async downloads
     void CommitAsyncFlushes();
@@ -178,11 +189,7 @@ protected:
 
     ::Common::unordered_map<u64, ::Common::unordered_map<u32, QueryLocation>> cached_queries;
     std::mutex cache_mutex;
-
-    /// Releases not written to guest memory yet (PendingRelease). Written on the GPU thread,
-    /// erased by the fence that writes them.
-    ::Common::unordered_map<DAddr, u32> pending_releases;
-    std::mutex pending_releases_mutex;
+    std::atomic<u64> page_serial{1};
 
     struct QueryCacheBaseImpl;
     friend struct QueryCacheBaseImpl;

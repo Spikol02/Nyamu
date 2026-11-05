@@ -102,13 +102,39 @@ AppletProgramId AppletIdToProgramId(AppletId applet_id) {
     }
 }
 
-AppletId FromNx2AppletId(AppletId applet_id) {
-    if (AppletIdToProgramId(applet_id) != static_cast<AppletProgramId>(0)) {
-        return applet_id;
+AppletId NormalizeAppletId(AppletId id) {
+    const u32 raw_id = static_cast<u32>(id);
+    static std::mutex mutex;
+    static std::unordered_set<u32> logged_raw_ids;
+    static std::unordered_set<u32> warned_raw_ids;
+
+    bool log_info = false;
+    {
+        std::scoped_lock lk{mutex};
+        log_info = logged_raw_ids.insert(raw_id).second;
     }
-    const auto low_byte = static_cast<AppletId>(static_cast<u32>(applet_id) & 0xFF);
-    return AppletIdToProgramId(low_byte) != static_cast<AppletProgramId>(0) ? low_byte
-                                                                         : applet_id;
+    if (log_info) {
+        LOG_INFO(Service_AM, "CreateLibraryApplet called with raw applet_id={:#x}", raw_id);
+    }
+
+    if (AppletIdToProgramId(id) == static_cast<AppletProgramId>(0)) {
+        const auto low_byte = static_cast<AppletId>(raw_id & 0xFF);
+        if (AppletIdToProgramId(low_byte) != static_cast<AppletProgramId>(0)) {
+            bool log_warning = false;
+            {
+                std::scoped_lock lk{mutex};
+                log_warning = warned_raw_ids.insert(raw_id).second;
+            }
+            if (log_warning) {
+                LOG_WARNING(Service_AM,
+                            "Normalizing unknown raw applet_id={:#x} to low byte {:#x}",
+                            raw_id, static_cast<u32>(low_byte));
+            }
+            return low_byte;
+        }
+    }
+
+    return id;
 }
 
 std::shared_ptr<ILibraryAppletAccessor> CreateGuestApplet(Core::System& system,
@@ -195,8 +221,8 @@ Result ILibraryAppletCreator::CreateLibraryApplet(
     LibraryAppletMode library_applet_mode) {
     LOG_DEBUG(Service_AM, "called with applet_id={} applet_mode={}", applet_id,
               library_applet_mode);
-    applet_id = FromNx2AppletId(applet_id);
 
+    applet_id = NormalizeAppletId(applet_id);
 
     std::shared_ptr<ILibraryAppletAccessor> library_applet;
     if (ShouldCreateGuestApplet(applet_id)) {
@@ -223,8 +249,8 @@ Result ILibraryAppletCreator::CreateLibraryAppletEx(
     LibraryAppletMode library_applet_mode, u64 thread_id) {
     LOG_DEBUG(Service_AM, "called with applet_id={} applet_mode={} thread_id={}", applet_id,
               library_applet_mode, thread_id);
-    applet_id = FromNx2AppletId(applet_id);
 
+    applet_id = NormalizeAppletId(applet_id);
 
     std::shared_ptr<ILibraryAppletAccessor> library_applet;
     if (ShouldCreateGuestApplet(applet_id)) {

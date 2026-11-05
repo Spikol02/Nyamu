@@ -231,6 +231,7 @@ OPCODE(FPRecipSqrt64,                                       F64,            F64,
 OPCODE(FPSqrt,                                              F32,            F32,                                                                            )
 OPCODE(FPSin,                                               F32,            F32,                                                                            )
 OPCODE(FPExp2,                                              F32,            F32,                                                                            )
+OPCODE(FPTanh,                                              F32,            F32,                                                                            )
 OPCODE(FPCos,                                               F32,            F32,                                                                            )
 OPCODE(FPLog2,                                              F32,            F32,                                                                            )
 OPCODE(FPSaturate16,                                        F16,            F16,                                                                            )
@@ -570,6 +571,9 @@ OPCODE(ImageAtomicAnd32,                                    U32,            Opaq
 OPCODE(ImageAtomicOr32,                                     U32,            Opaque,            Opaque,            U32,                                      )
 OPCODE(ImageAtomicXor32,                                    U32,            Opaque,            Opaque,            U32,                                      )
 OPCODE(ImageAtomicExchange32,                               U32,            Opaque,            Opaque,            U32,                                      )
+
+// Software matrix collective.
+OPCODE(TensorMulAdd, U32x2, U32x4, U32x2, U32x2, )
 
 // Warp operations
 OPCODE(LaneId,                                              U32,                                                                                            )

@@ -18,6 +18,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/div_ceil.h"
+#include "common/paged_scalar.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/device_memory.h"
@@ -191,9 +192,7 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
         u64 size;
     };
     std::vector<Run> runs;
-    // Past the tracked pages nothing is backed (each read there logged a critical error).
-    const size_t page_end = (std::min)(Common::DivCeil(address + size, Memory::YUZU_PAGESIZE),
-                                       tracked_entries.size());
+    const size_t page_end = Common::DivCeil(address + size, Memory::YUZU_PAGESIZE);
     for (size_t page = address >> Memory::YUZU_PAGEBITS; page < page_end; ++page) {
         const u32 compressed = tracked_entries[page].compressed_physical_ptr;
         if (compressed == 0) {
@@ -420,23 +419,17 @@ const T* DeviceMemoryManager<Traits>::GetPointer(DAddr address) const {
 template <typename Traits>
 template <typename T>
 void DeviceMemoryManager<Traits>::Write(DAddr address, T value) {
-    T* ptr = GetPointer<T>(address);
-    if (!ptr) [[unlikely]] {
-        return;
-    }
-    std::memcpy(ptr, &value, sizeof(T));
+    Common::WritePagedScalar(address, value, [&](DAddr page_address) {
+        return page_address < device_as_size ? GetPointer<u8>(page_address) : nullptr;
+    });
 }
 
 template <typename Traits>
 template <typename T>
 T DeviceMemoryManager<Traits>::Read(DAddr address) const {
-    const T* ptr = GetPointer<T>(address);
-    T result{};
-    if (!ptr) [[unlikely]] {
-        return result;
-    }
-    std::memcpy(&result, ptr, sizeof(T));
-    return result;
+    return Common::ReadPagedScalar<T>(address, [&](DAddr page_address) {
+        return page_address < device_as_size ? GetPointer<u8>(page_address) : nullptr;
+    });
 }
 
 template <typename Traits>
@@ -631,7 +624,8 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
     const size_t page_end = Common::DivCeil(addr + size, Memory::YUZU_PAGESIZE);
     size_t page = addr >> Memory::YUZU_PAGEBITS;
     auto [asid, base_vaddress] = ExtractCPUBacking(page);
-    auto* memory_device_inter = registered_processes[asid.id];
+    auto* memory_device_inter =
+        asid.id < registered_processes.size() ? registered_processes[asid.id] : nullptr;
     const auto release_pending = [&] {
         if (uncache_bytes > 0) {
             if (memory_device_inter != nullptr) {
@@ -662,7 +656,8 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
         if (asid.id != asid_2.id) [[unlikely]] {
             release_pending();
             asid = asid_2;
-            memory_device_inter = registered_processes[asid_2.id];
+            memory_device_inter =
+                asid_2.id < registered_processes.size() ? registered_processes[asid_2.id] : nullptr;
         }
 
         if (vpage != old_vpage + 1) [[unlikely]] {
@@ -681,8 +676,10 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
             }
             uncache_bytes += Memory::YUZU_PAGESIZE;
         } else if (uncache_bytes > 0) {
-            MarkRegionCaching(memory_device_inter, uncache_begin << Memory::YUZU_PAGEBITS,
-                              uncache_bytes, false);
+            if (memory_device_inter != nullptr) {
+                MarkRegionCaching(memory_device_inter, uncache_begin << Memory::YUZU_PAGEBITS,
+                                  uncache_bytes, false);
+            }
             uncache_bytes = 0;
         }
         if (count.load(std::memory_order::relaxed) == 1 && delta > 0) {
@@ -691,8 +688,10 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
             }
             cache_bytes += Memory::YUZU_PAGESIZE;
         } else if (cache_bytes > 0) {
-            MarkRegionCaching(memory_device_inter, cache_begin << Memory::YUZU_PAGEBITS,
-                              cache_bytes, true);
+            if (memory_device_inter != nullptr) {
+                MarkRegionCaching(memory_device_inter, cache_begin << Memory::YUZU_PAGEBITS,
+                                  cache_bytes, true);
+            }
             cache_bytes = 0;
         }
     }

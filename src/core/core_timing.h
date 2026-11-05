@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include <boost/heap/fibonacci_heap.hpp>
 
@@ -156,6 +157,14 @@ public:
     Common::Event event{};
     Common::Event pause_event{};
     std::function<void()> on_thread_init{};
+    /// How the timer thread waited (logged every 10 s; timer thread only).
+    struct TimingStats {
+        u64 coarse_waits{};
+        u64 precise_waits{};
+        std::unordered_map<std::string, u64> fired; ///< Events run, by name
+        std::chrono::steady_clock::time_point window_start{};
+        void Report();
+    } timing_stats;
     std::jthread timer_thread;
     mutable std::mutex basic_lock;
     std::mutex advance_lock;

@@ -67,6 +67,8 @@ public:
     /// @param size Number of bytes of the invalidation
     void InvalidateRegion(VAddr addr, size_t size);
 
+    void InvalidateRegions(std::span<const std::pair<DAddr, size_t>> sequences);
+
     /// @brief Unmarks a memory region as cached and marks it for removal
     /// @param addr Start address of the CPU write operation
     /// @param size Number of bytes of the CPU write operation
@@ -74,6 +76,19 @@ public:
 
     /// @brief Flushes delayed removal operations
     void SyncGuestHost();
+
+    /// EDEN_NX2_INLINE_INVALIDATE: changes whenever a shader or a rejected program is remembered.
+    [[nodiscard]] u64 PageSerial() const noexcept {
+        return page_serial.load(std::memory_order_acquire);
+    }
+
+    /// The page serial when no shader or rejected program is in [addr, addr + size), else 0.
+    [[nodiscard]] u64 CleanSerial(VAddr addr, size_t size);
+
+    /// Whether invalidated shaders wait for RemovePendingShaders.
+    [[nodiscard]] bool HasPendingRemovals() const noexcept {
+        return removal_pending.load(std::memory_order_acquire);
+    }
 
 protected:
     struct GraphicsEnvironments {
@@ -103,9 +118,9 @@ protected:
     std::array<const ShaderInfo*, NUM_PROGRAMS> shader_infos{};
     bool last_shaders_valid = false;
 
-    Tegra::MaxwellDeviceMemoryManager& device_memory;
-
 private:
+    friend struct ShaderCacheTestAccess;
+
     /// @brief Tries to obtain a cached shader starting in a given address
     /// @note Doesn't check for ranges, the given address has to be the start of the shader
     /// @param addr Start address of the shader, this doesn't cache for region
@@ -158,6 +173,8 @@ private:
     /// Hash of the state task and mesh programs are translated with.
     u64 MeshStateHash() const;
 
+    Tegra::MaxwellDeviceMemoryManager& device_memory;
+
     mutable std::mutex lookup_mutex;
     std::mutex invalidation_mutex;
 
@@ -173,6 +190,8 @@ private:
     /// Bounds of every address ever rejected (never shrinks): a quick test for invalidations.
     std::atomic<VAddr> rejected_lowest{~VAddr{}};
     std::atomic<VAddr> rejected_highest{};
+    std::atomic<u64> page_serial{1};
+    std::atomic<bool> removal_pending{};
 };
 
 } // namespace VideoCommon

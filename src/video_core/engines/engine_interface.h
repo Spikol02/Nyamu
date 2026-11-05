@@ -44,9 +44,20 @@ public:
     }
 
     std::bitset<(std::numeric_limits<u16>::max)()> execution_mask{};
+    /// Methods that can write memory in command order (uploads, reports, copies, dispatches):
+    /// the split's front waits for the last one sent before its macros read memory. Draws and
+    /// clears are left out: their writes are visible only after a host-level wait.
+    std::bitset<(std::numeric_limits<u16>::max)()> memory_write_mask =
+        std::bitset<(std::numeric_limits<u16>::max)()>{}.set();
+    /// Of those, methods whose writes are shader or copy work that marks the pages it writes as
+    /// GPU-written once it runs (EDEN_NX2_DMA_RANGES waits for them only on such pages).
+    std::bitset<(std::numeric_limits<u16>::max)()> writer_work_mask{};
     std::vector<std::pair<u32, u32>> method_sink{};
     GPUVAddr current_dma_segment;
     bool current_dirty{};
+    /// EDEN_NX2_FAST_DRAW: the engine reports its own changes (Maxwell3D); a method of any other
+    /// engine ends draw reuse.
+    bool reports_fast_draw_breaks{};
 protected:
     virtual void ConsumeSinkImpl(Core::System& system) {
         for (auto [method, value] : method_sink) {

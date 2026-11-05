@@ -7,10 +7,8 @@
 #pragma once
 
 #include <array>
-#include <bit>
 
 #include <sirit/sirit.h>
-#include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
 
 #include "shader_recompiler/backend/bindings.h"
@@ -176,7 +174,7 @@ public:
     [[nodiscard]] Id BitOffset16(const IR::Value& offset);
 
     Id Const(u32 value) {
-        return CachedConstant(u32_constants, U32[1], value, value);
+        return Constant(U32[1], value);
     }
 
     Id Const(u32 element_1, u32 element_2) {
@@ -210,23 +208,13 @@ public:
     }
 
     Id Const(f32 value) {
-        return CachedConstant(f32_constants, F32[1], std::bit_cast<u32>(value), value);
-    }
-
-    /// Sirit deduplicates constants, but by hashing a freshly allocated copy of their words on
-    /// every call; immediates are emitted over and over, so remember the ids of scalar constants.
-    /// Keys are bit patterns, like Sirit's (0.0f and -0.0f stay distinct).
-    template <typename T>
-    Id CachedConstant(::Common::unordered_map<u32, Id>& cache, Id type, u32 bits, T value) {
-        const auto [it, is_new]{cache.try_emplace(bits)};
-        if (is_new) {
-            it->second = Constant(type, value);
-        }
-        return it->second;
+        return Constant(F32[1], value);
     }
 
     const Profile& profile;
     const RuntimeInfo& runtime_info;
+    const bool requires_coherent_global_memory;
+    const bool requires_coherent_image_memory;
     Stage stage{};
 
     Id void_id{};
@@ -241,9 +229,6 @@ public:
     VectorTypes S32;
     VectorTypes F16;
     VectorTypes F64;
-
-    ::Common::unordered_map<u32, Id> u32_constants;
-    ::Common::unordered_map<u32, Id> f32_constants;
 
     Id true_value{};
     Id false_value{};
@@ -360,6 +345,8 @@ public:
     Id write_global_func_u32{};
     Id write_global_func_u32x2{};
     Id write_global_func_u32x4{};
+    Id atomic_add_global_func_u32{};
+    Id atomic_umax_global_func_u32{};
 
     bool need_input_position_indirect{};
     Id input_position{};
@@ -377,6 +364,7 @@ public:
     Id sample_mask{};
     Id frag_depth{};
 
+    std::array<Id, 2> software_matrix_functions{};
     std::vector<Id> interfaces;
     std::vector<std::pair<u32, spv::Op>> opcode_rewrites;
 
@@ -437,7 +425,7 @@ private:
     void DefineImages(const Info& info, u32& binding, u32& scaling_index);
     void DefineAttributeMemAccess(const Info& info);
     void DefineWriteStorageCasLoopFunction(const Info& info);
-    void DefineGlobalMemoryFunctions(const Info& info);
+    void DefineGlobalMemoryFunctions(const IR::Program& program);
     void DefineRescalingInput(const Info& info);
     void DefineRescalingInputPushConstant();
     void DefineRescalingInputUniformConstant();

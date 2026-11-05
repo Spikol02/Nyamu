@@ -3064,12 +3064,14 @@ public:
             Maxwell3D::Regs::PrimitiveTopology topology{};
             DrawMode draw_mode{};
             bool draw_indexed{};
-            u32 draw_element_count{}; ///< Of the draw being processed, 0 when it is indirect.
+            u32 draw_element_count{}; // Zero for indirect draws whose count is not known yet.
             u32 base_index{};
             Maxwell3D::Regs::VertexBuffer vertex_buffer;
             Maxwell3D::Regs::IndexBuffer index_buffer;
             u32 base_instance{};
             u32 instance_count{};
+            /// Deferred instances already drawn by flushes in the middle of the current loop.
+            u32 drawn_instances{};
             std::vector<u8> inline_index_draw_indexes;
         };
         struct DrawTextureState {
@@ -3096,7 +3098,8 @@ public:
         };
         void ProcessMethodCall(Maxwell3D& maxwell3d, u32 method, u32 argument);
         void Clear(Maxwell3D& maxwell3d, u32 layer_count);
-        void DrawDeferred(Maxwell3D& maxwell3d);
+        /// Draws the waiting instances. loop_continues is set when the loop goes on afterwards.
+        void DrawDeferred(Maxwell3D& maxwell3d, bool loop_continues = false);
         /// Instances after the first wait to be drawn together (DrawDeferred).
         [[nodiscard]] bool HasDeferredDraw() const noexcept {
             return draw_state.draw_mode == DrawMode::Instance && draw_state.instance_count != 0;
@@ -3118,7 +3121,6 @@ public:
         void ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed, u32 instance_count);
         void ProcessDrawIndirect(Maxwell3D& maxwell3d);
         State draw_state{};
-        u32 instance_index{};
         DrawTextureState draw_texture_state{};
         IndirectParams indirect_state{};
     };
@@ -3263,6 +3265,17 @@ public:
     /// Handles a write to the CB_BIND register.
     void ProcessCBBind(size_t stage_index);
 
+    /// EDEN_NX2_DRAW_RUNS: a register write about to be applied on the back.
+    void NoteDrawRunsWrite(u32 method, u32 argument);
+
+    /// EDEN_NX2_FAST_DRAW: registers that only parameterize the next draw or the next constant
+    /// buffer bind, or that ProcessMethodCall handles, so writing them doesn't end draw reuse.
+    static bool IsFastDrawParameter(u32 method);
+    /// Methods EDEN_NX2_FAST_DRAW=2 records as light changes (constant buffer data and binds).
+    static bool IsFastDrawDeltaMethod(u32 method);
+    static bool IsFastDrawVertexBuffer(u32 method);
+    void NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end);
+
     /// Handles a write to the CB_DATA[i] register.
     void ProcessCBData(u32 value);
     void ProcessCBMultiData(const u32* start_base, u32 amount);
@@ -3351,7 +3364,17 @@ private:
     };
     std::array<RecentWrite, 48> recent_writes{};
     size_t recent_write_index = 0;
+    const bool record_write_history{
+#ifdef NDEBUG
+        std::getenv("EDEN_NX2_3D_HISTORY") != nullptr
+#else
+        true
+#endif
+    };
     void RecordWrite(u32 method, u32 argument, u32 amount, u32 pending) {
+        if (!record_write_history) {
+            return;
+        }
         recent_writes[recent_write_index++ % recent_writes.size()] = {method, argument, amount, pending};
     }
     void DumpRecentWrites(u32 method);
@@ -3377,8 +3400,11 @@ private:
     void FrontWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
                     bool is_last_call, bool from_macro);
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
-    void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 count);
+    void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
+                      u32 count);
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
+    /// EDEN_NX2_CB_COALESCE: sends the macro's gathered constant buffer data words as one entry.
+    void FlushFrontCbData(VideoCommon::GpuSplit& split, FrontState& state);
     void FinishFrontMacro(Core::System& system);
     std::unique_ptr<FrontState> front;
     bool front_macros{};

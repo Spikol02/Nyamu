@@ -24,6 +24,7 @@
 #include "core/cpu_manager.h"
 #include "core/debugger/debugger.h"
 #include "core/device_memory.h"
+#include "core/file_sys/content_archive.h"
 #include "core/file_sys/fs_filesystem.h"
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/patch_manager.h"
@@ -31,6 +32,7 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/savedata_factory.h"
+#include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs_concat.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/gpu_dirty_memory_manager.h"
@@ -67,7 +69,6 @@
 #include "hid_core/hid_core.h"
 #include "network/network.h"
 #include "video_core/host1x/host1x.h"
-#include "video_core/nx2.h"
 #include "video_core/renderer_base.h"
 #include "video_core/video_core.h"
 
@@ -116,8 +117,8 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
 
 namespace {
 
-// Switch 2 titles boot as a loose ExeFS, with main.npdm next to main.
-bool IsSwitch2Program(const FileSys::VirtualFile& file) {
+// Detect the platform before initializing the kernel memory layout and guest clock.
+bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::size_t program_index) {
     FileSys::ProgramMetadata metadata;
     if (FileSys::NupContainer::IsNupFile(file)) {
         FileSys::NupContainer nup{file};
@@ -133,6 +134,22 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file) {
             program = update;
         }
         const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
+        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+               metadata.IsSwitch2();
+    }
+    const auto type = file != nullptr ? Loader::IdentifyFile(file) : Loader::FileType::Unknown;
+    if (type == Loader::FileType::NSP || type == Loader::FileType::NSZ) {
+        const FileSys::NSP nsp{file, program_id, program_index};
+        if (nsp.GetStatus() != Loader::ResultStatus::Success) {
+            return false;
+        }
+        auto exefs = nsp.GetExeFS();
+        if (!nsp.IsExtractedType()) {
+            const auto program =
+                nsp.GetNCA(nsp.GetProgramTitleID(), FileSys::ContentRecordType::Program);
+            exefs = program != nullptr ? program->GetExeFS() : nullptr;
+        }
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
         return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
                metadata.IsSwitch2();
@@ -183,8 +200,6 @@ struct System::Impl {
         const bool must_reinitialize =
             !device_memory.has_value() ||
             is_multicore != Settings::values.use_multi_core.GetValue() ||
-            // Any change of size: the device memory was made for the old one. Switch 2 titles force
-            // 12 GiB, and with 6-10 GiB configured the kernel handed out memory past its end.
             memory_layout != Settings::values.memory_layout_mode.GetValue();
 
         if (!must_reinitialize) {
@@ -337,7 +352,8 @@ struct System::Impl {
 
         const bool switch2_program =
             virtual_filesystem != nullptr &&
-            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath));
+            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath), params.program_id,
+                             params.program_index);
         Settings::SetCurrentProgramIsSwitch2(switch2_program);
         Settings::SetAstcRecompressionOverride(std::nullopt);
 
@@ -400,9 +416,6 @@ struct System::Impl {
 
         // Expose program id to dump sites and other global readers.
         Settings::SetCurrentProgramID(params.program_id);
-        // The per-title GPU decisions (Nx2NeedsBufferDownloads) need it before the first fence;
-        // the nvhost-ctrl-gpu query that also sets it may come later or not at all.
-        Tegra::g_nx2_program_id = params.program_id;
 
         // Track launch time for frontend launches
         LaunchTimestampCache::SaveLaunchTimestamp(params.program_id);

@@ -10,8 +10,9 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
-#include <memory>
+#include <functional>
 #include <mutex>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -66,11 +67,6 @@ struct hash<Vulkan::GraphicsPipelineCacheKey> {
 
 namespace Vulkan {
 
-/// SPIR-V modules of the graphics stages, null for unused stages. Shared by the pipelines whose
-/// keys differ only in state the shaders do not see (ShaderReuseCache).
-using GraphicsShaderModules =
-    std::array<vk::ShaderModule, Tegra::Engines::Maxwell3D::Regs::MaxShaderStage>;
-
 class Device;
 class PipelineStatistics;
 class RenderPassCache;
@@ -89,11 +85,25 @@ public:
         GuestDescriptorQueue& guest_descriptor_queue,
         DescriptorBufferRing& descriptor_buffer_ring, Common::ThreadWorker* worker_thread,
         PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
-        const GraphicsPipelineCacheKey& key,
-        std::shared_ptr<const GraphicsShaderModules> modules,
+        const GraphicsPipelineCacheKey& key, std::array<vk::ShaderModule, NUM_STAGES> stages,
         const std::array<const Shader::Info*, NUM_STAGES>& infos);
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
+    const std::array<u64, 6>& ShaderHashes() const noexcept {
+        return key.unique_hashes;
+    }
+
+    struct SampledImage {
+        u32 stage;
+        u32 tic;
+        VideoCommon::ImageViewId id;
+    };
+
+    /// The sampled textures of the last configured draw, kept for EDEN_NX2_FRAME_DUMP_SAMPLED.
+    std::span<const SampledImage> SampledImages() const noexcept {
+        return sampled_images;
+    }
+
     bool SupportsAlphaToCoverage() const noexcept {
         return fragment_has_color0_output;
     }
@@ -146,8 +156,59 @@ public:
         transitions.clear();
     }
 
+    [[nodiscard]] bool WritesStorage() const noexcept {
+        return writes_storage;
+    }
+
+    /// Writes storage images or image buffers (their images are marked modified when resolved).
+    [[nodiscard]] bool WritesImages() const noexcept {
+        return writes_images;
+    }
+
     [[nodiscard]] bool IsBuilt() const noexcept {
         return is_built.load(std::memory_order::relaxed);
+    }
+
+    /// EDEN_NX2_FAST_DRAW=2 (nx2_fast_draw.h): whether draws can keep this pipeline's resolved
+    /// image views and samplers after light changes. Handles computed at draw time are resolved
+    /// on every draw.
+    [[nodiscard]] bool TakesDeltaDraws() const noexcept {
+        return delta_blocker == DeltaBlocker::None && delta_views_valid;
+    }
+
+    /// Why TakesDeltaDraws is false (diagnostics).
+    enum class DeltaBlocker : u8 {
+        None,
+        WritesImages,
+        Mesh,
+        ComputedHandles,
+        NotConfigured,
+        Count,
+    };
+    [[nodiscard]] DeltaBlocker DeltaDrawBlocker() const noexcept {
+        return delta_blocker != DeltaBlocker::None ? delta_blocker
+               : delta_views_valid                 ? DeltaBlocker::None
+                                                   : DeltaBlocker::NotConfigured;
+    }
+
+    /// Constant buffer slots per stage the pipeline reads texture and image handles from.
+    [[nodiscard]] const std::array<u32, NUM_STAGES>& HandleConstantBuffers() const noexcept {
+        return handle_constant_buffers;
+    }
+
+    enum class DeltaResult { Configured, Failed, NeedsFull };
+    /// Binds the constant and storage buffers again (storage buffer addresses are read from
+    /// constant buffers) and records the draw's descriptors with the image views, samplers and
+    /// texture buffers the last full Configure resolved.
+    DeltaResult ConfigureDelta();
+
+    /// EDEN_NX2_FAST_DRAW_VERIFY: the next Configure compares what it resolves with the views
+    /// and samplers a delta draw would have kept; DeltaMismatch reports the result.
+    void VerifyNextDelta() noexcept {
+        verify_delta = true;
+    }
+    [[nodiscard]] bool DeltaMismatch() const noexcept {
+        return delta_mismatch;
     }
 
     template <typename Spec>
@@ -161,6 +222,9 @@ public:
     }
 
 private:
+    /// Builds the pipeline once, on whichever thread gets here first.
+    void RunBuild();
+
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);
 
@@ -188,15 +252,27 @@ private:
     std::vector<GraphicsPipeline*> transitions;
     u64 last_use_frame{};
 
-    std::shared_ptr<const GraphicsShaderModules> spv_modules;
+    std::array<vk::ShaderModule, NUM_STAGES> spv_modules;
 
     std::array<Shader::Info, NUM_STAGES> stage_infos;
     std::array<u32, 5> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     u32 num_descriptor_entries{};
     size_t num_image_elements{};
+    std::vector<SampledImage> sampled_images;
     u32 num_textures{};
     bool fragment_has_color0_output{};
+    bool writes_storage{};
+    bool writes_images{};
+
+    DeltaBlocker delta_blocker{};
+    bool delta_views_valid{};
+    bool verify_delta{};
+    bool delta_mismatch{};
+    std::array<bool, NUM_STAGES> configured_stages{};
+    std::array<u32, NUM_STAGES> handle_constant_buffers{};
+    std::vector<VideoCommon::ImageViewInOut> delta_views;
+    std::vector<VideoCommon::SamplerId> delta_samplers;
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;
@@ -210,6 +286,8 @@ private:
     u32 last_descriptor_buffer_chunk{};
     u64 last_descriptor_buffer_generation{};
 
+    std::function<void()> build_task;
+    std::atomic_bool build_claimed{false};
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};

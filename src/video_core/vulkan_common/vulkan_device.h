@@ -78,10 +78,11 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(EXT, VertexInputDynamicState, VERTEX_INPUT_DYNAMIC_STATE, vertex_input_dynamic_state)  \
     FEATURE(KHR, Maintenance5, MAINTENANCE_5, maintenance5)                                        \
     FEATURE(KHR, Maintenance6, MAINTENANCE_6, maintenance6)                                        \
-    FEATURE(NV, OpticalFlow, OPTICAL_FLOW, optical_flow)                                           \
     FEATURE(KHR, PipelineExecutableProperties, PIPELINE_EXECUTABLE_PROPERTIES,                     \
             pipeline_executable_properties)                                                        \
     FEATURE(KHR, ShaderQuadControl, SHADER_QUAD_CONTROL, shader_quad_control)                      \
+    FEATURE(KHR, ShaderMaximalReconvergence, SHADER_MAXIMAL_RECONVERGENCE,                        \
+            shader_maximal_reconvergence)                                                        \
     FEATURE(KHR, WorkgroupMemoryExplicitLayout, WORKGROUP_MEMORY_EXPLICIT_LAYOUT,                  \
             workgroup_memory_explicit_layout)
 
@@ -290,6 +291,11 @@ public:
         return physical;
     }
 
+    /// Returns the instance the device was created from.
+    VkInstance GetInstance() const {
+        return instance;
+    }
+
     VkPipelineCache StaticPipelineCache() const noexcept {
         return *static_pipeline_cache;
     }
@@ -302,21 +308,6 @@ public:
     /// Returns the main present queue.
     vk::Queue GetPresentQueue() const {
         return present_queue;
-    }
-
-    /// Returns true when VK_NV_optical_flow is enabled and a dedicated optical flow queue exists.
-    bool CanUseOpticalFlow() const {
-        return extensions.optical_flow && has_optical_flow_queue;
-    }
-
-    /// Returns the optical flow queue family index (valid when CanUseOpticalFlow() is true).
-    u32 GetOpticalFlowFamily() const {
-        return optical_flow_family;
-    }
-
-    /// Returns the optical flow queue (valid when CanUseOpticalFlow() is true).
-    vk::Queue GetOpticalFlowQueue() const {
-        return optical_flow_queue;
     }
 
     /// Returns main graphics queue family index.
@@ -423,7 +414,6 @@ public:
 #define FN_MAX_LIMIT_LIST \
     FN_MAX_LIMIT_ELEM(ComputeSharedMemorySize) \
     FN_MAX_LIMIT_ELEM(PerStageDescriptorSampledImages) \
-    FN_MAX_LIMIT_ELEM(PerStageDescriptorStorageBuffers) \
     FN_MAX_LIMIT_ELEM(PerStageResources) \
     FN_MAX_LIMIT_ELEM(DescriptorSetSamplers) \
     FN_MAX_LIMIT_ELEM(DescriptorSetUniformBuffers) \
@@ -446,6 +436,11 @@ FN_MAX_LIMIT_LIST
 
     bool IsOptimalAstcSupported() const {
         return is_optimal_astc_supported;
+    }
+
+    /// Returns true if geometry shaders are supported.
+    bool IsGeometryShaderSupported() const {
+        return features.features.geometryShader;
     }
 
     /// Returns true if BCn is natively supported.
@@ -578,6 +573,11 @@ FN_MAX_LIMIT_LIST
         return features.features.shaderStorageImageReadWithoutFormat;
     }
 
+    /// Returns true if storage images of the extended formats (e.g. R16F, RG16F, R8) are supported.
+    bool IsStorageImageExtendedFormatsSupported() const {
+        return features.features.shaderStorageImageExtendedFormats;
+    }
+
     /// Returns true if shader int64 is supported.
     bool IsShaderInt64Supported() const {
         return features.features.shaderInt64;
@@ -663,6 +663,16 @@ FN_MAX_LIMIT_LIST
     /// Returns true if the device supports VK_KHR_shader_quad_control.
     bool IsKhrShaderQuadControlSupported() const {
         return extensions.shader_quad_control && features.shader_quad_control.shaderQuadControl;
+    }
+
+    /// Returns true if the device can build tessellation pipelines.
+    bool IsTessellationSupported() const {
+        return features.features.tessellationShader;
+    }
+
+    /// Returns the largest patch size (control points, and TCS output vertices) a pipeline allows.
+    u32 GetMaxTessellationPatchSize() const {
+        return properties.properties.limits.maxTessellationPatchSize;
     }
 
     /// Returns true if the device supports task and mesh shaders (VK_EXT_mesh_shader).
@@ -1178,6 +1188,12 @@ FN_MAX_LIMIT_LIST
         return properties.driver.driverID == VK_DRIVER_ID_MOLTENVK;
     }
 
+    /// The multiple vertex input binding strides must be. Metal needs 4 bytes, which MoltenVK
+    /// reports as minVertexInputBindingStrideAlignment through VK_KHR_portability_subset.
+    u32 GetMinVertexInputBindingStrideAlignment() const noexcept {
+        return IsMoltenVK() ? 4 : 1;
+    }
+
     NvidiaArchitecture GetNvidiaArch() const noexcept {
         return nvidia_arch;
     }
@@ -1235,14 +1251,11 @@ private:
     vk::Device logical;          ///< Logical device.
     vk::Queue graphics_queue;    ///< Main graphics queue.
     vk::Queue present_queue;     ///< Main present queue.
-    vk::Queue optical_flow_queue; ///< Optical flow queue (VK_NV_optical_flow), if any.
     vk::PipelineCache static_pipeline_cache;
     bool owns_static_pipeline_cache{};
     u32 instance_version{};      ///< Vulkan instance version.
     u32 graphics_family{};       ///< Main graphics queue family index.
     u32 present_family{};        ///< Main present queue family index.
-    u32 optical_flow_family{};   ///< Optical flow queue family index (VK_NV_optical_flow).
-    bool has_optical_flow_queue{}; ///< True when a dedicated optical flow queue family exists.
     bool graphics_family_sparse_binding{};
 
     struct Extensions {
@@ -1335,6 +1348,8 @@ private:
     // Telemetry parameters
     std::set<std::string, std::less<>> supported_extensions; ///< Reported Vulkan extensions.
     std::set<std::string, std::less<>> loaded_extensions;    ///< Loaded Vulkan extensions.
+    bool streamline_extensions{}; ///< NVIDIA DLSS's extensions are loaded.
+    bool streamline_attached{};   ///< Streamline has this device.
     std::vector<size_t> valid_heap_memory;                   ///< Heaps used.
     size_t main_heap{};       ///< Largest device-local heap, where images live.
     u64 heap_size_limit{};    ///< EDEN_NX2_VRAM_LIMIT_MIB for device-local heaps, 0 if unset.

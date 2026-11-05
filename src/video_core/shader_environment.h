@@ -21,8 +21,9 @@
 #include "common/polyfill_thread.h"
 #include "common/unique_function.h"
 #include "shader_recompiler/environment.h"
+#include "shader_recompiler/frontend/ampere/instruction.h"
 #include "video_core/engines/maxwell_3d.h"
-#include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/textures/texture.h"
 
 namespace Tegra {
 class Memorymanager;
@@ -33,9 +34,11 @@ namespace VideoCommon {
 /// A native (Switch 2) program after capture and lowering to Maxwell code. The shader cache keeps
 /// it so the environments built for the program's pipelines don't capture and lower it again.
 struct LoweredNativeCode {
+    u64 native_program_key{};
     /// Shader header, lowered instructions with Maxwell scheduling words, then the native
     /// address map (what the environment's `code` used to be filled with).
     std::vector<u64> code;
+    std::vector<Shader::Ampere::Instruction> trap_prefix;
     /// Bytes of the native program that were read, header included.
     size_t source_size{};
     /// Constant buffer holding the texture handles if the program requires one, otherwise ~0U
@@ -63,6 +66,13 @@ public:
 
     [[nodiscard]] u32 TranslateProgramAddress(u32 address) const override;
 
+    [[nodiscard]] bool IsNativeProgram() const override;
+
+    [[nodiscard]] bool IsCbufStorageBufferPointer(u32 index, u32 offset) override;
+
+    [[nodiscard]] bool IsCbufIndirectStorageBufferPointer(u32 index, u32 offset,
+                                                          u32 indirect) override;
+
     [[nodiscard]] std::optional<u64> Analyze();
 
     void SetCachedSize(size_t size_bytes);
@@ -81,6 +91,11 @@ public:
         return lowered_native;
     }
 
+    /// The program's GPU address (the shader dump names native programs by it).
+    [[nodiscard]] GPUVAddr ProgramBase() const noexcept {
+        return program_base;
+    }
+
     [[nodiscard]] bool CanBeSerialized() const noexcept;
 
     [[nodiscard]] u64 CalculateHash() const;
@@ -92,14 +107,17 @@ public:
     bool HasHLEMacroState() const override {
         return has_hle_engine_state;
     }
+    bool HasNativeInstructions() const override;
 
 protected:
     std::optional<u64> TryFindSize();
+    virtual std::optional<u32> ReadTrapGuardConstant(u32, u32) { return std::nullopt; }
 
     /// Adopts an already lowered native program, or captures and lowers it when there is none.
     void InitializeNativeCode(std::shared_ptr<const LoweredNativeCode> lowered,
-                              u32 source_header_size = 128);
-    std::shared_ptr<const LoweredNativeCode> LowerNativeCode(u32 source_header_size);
+                              u32 source_header_size = 128, bool geometry_stage = false);
+    std::shared_ptr<const LoweredNativeCode> LowerNativeCode(u32 source_header_size,
+                                                          bool geometry_stage);
     size_t native_source_size{};
     std::shared_ptr<const LoweredNativeCode> lowered_native;
 
@@ -113,6 +131,7 @@ protected:
     ::Common::unordered_map<u32, Shader::TextureType> texture_types;
     ::Common::unordered_map<u32, Shader::TexturePixelFormat> texture_pixel_formats;
     ::Common::unordered_map<u64, u32> cbuf_values;
+    ::Common::unordered_map<u64, u8> storage_pointer_types; ///< IsCbufStorageBufferPointer answers
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
 
     u32 local_memory_size{};
@@ -156,44 +175,46 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
-    /// Copies what translation reads from the 3D engine and stops using the engine, so the
-    /// program can be translated on a worker thread while the GPU thread moves on. Returns
-    /// false, leaving the environment unchanged, when the texture pool is larger than the copy
-    /// bound or not fully mapped.
-    [[nodiscard]] bool Detach();
+    using TexturePool = std::vector<Tegra::Texture::TICEntry>;
 
-    /// Bytes of constant buffer and texture descriptor contents copied by Detach (0 if not
-    /// detached).
-    [[nodiscard]] size_t SnapshotSizeBytes() const noexcept;
+    /// Copies the 3D engine's texture pool for Detach, shared by a pipeline's environments. Null
+    /// when it is too large to copy or not mapped.
+    [[nodiscard]] static std::shared_ptr<const TexturePool> CopyTexturePool(
+        Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager& gpu_memory);
+
+    /// Copies what translation reads of the 3D engine's live state (this stage's constant buffers,
+    /// the texture pool, the viewport flag, the HLE replacements), so a translation worker can use
+    /// the environment while the GPU thread moves on. Only for native programs, whose code was
+    /// lowered up front: their instructions are not read from guest memory.
+    [[nodiscard]] bool Detach(std::shared_ptr<const TexturePool> texture_pool);
+
+    /// Detached without a copied texture pool (too large to copy), translation reads descriptors
+    /// from the live pool: whether the texture types and formats it read are still what the 3D
+    /// engine's pool gives, so the translation fits the current draw.
+    [[nodiscard]] bool TexturesMatch(Tegra::Engines::Maxwell3D& maxwell3d_);
 
 private:
-    /// The 3D engine state a detached environment reads instead of the engine.
     struct EngineSnapshot {
         struct ConstBuffer {
             bool enabled{};
             u32 size{};
-            /// Contents when the environment was detached, one word longer than `size` so a
-            /// read at any offset below `size` stays inside the copy.
             std::vector<u8> bytes;
         };
         std::array<ConstBuffer, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers> const_buffers;
-
-        /// Texture descriptors (TIC entries 0 to the pool limit) when the environment was
-        /// detached.
-        std::vector<Tegra::Texture::TICEntry> texture_pool;
+        std::shared_ptr<const TexturePool> texture_pool; ///< Null: read from tic_address
+        GPUVAddr tic_address{};
+        u32 tic_limit{};
         bool via_header_index{};
-
         u32 viewport_scale_offset_enabled{};
         ::Common::unordered_map<u64, Tegra::Engines::Maxwell3D::HLEReplacementAttributeType>
             replace_table;
     };
 
-    /// Texture descriptor (TIC entry) of a texture handle, from the engine or the snapshot.
-    Tegra::Texture::TICEntry ReadTextureDescriptor(u32 handle);
+    Tegra::Texture::TICEntry TextureEntry(u32 handle);
 
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
-    std::optional<EngineSnapshot> snapshot;
+    std::shared_ptr<const EngineSnapshot> snapshot; ///< Set once detached
 };
 
 class ComputeEnvironment final : public GenericEnvironment {
@@ -222,8 +243,12 @@ public:
     }
 
 private:
+    std::optional<u32> ReadTrapGuardConstant(u32 bank, u32 offset) override;
     Tegra::Engines::KeplerCompute* kepler_compute{};
 };
+
+std::optional<u32> ReadNativeGuardConstant(Tegra::Engines::KeplerCompute& compute,
+                                         Tegra::MemoryManager& memory, u32 bank, u32 offset);
 
 class FileEnvironment final : public Shader::Environment {
 public:
@@ -241,6 +266,13 @@ public:
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 
     [[nodiscard]] u32 TranslateProgramAddress(u32 address) const override;
+
+    [[nodiscard]] bool IsNativeProgram() const override;
+
+    [[nodiscard]] bool IsCbufStorageBufferPointer(u32 index, u32 offset) override;
+
+    [[nodiscard]] bool IsCbufIndirectStorageBufferPointer(u32 index, u32 offset,
+                                                          u32 indirect) override;
 
     [[nodiscard]] u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) override;
 
@@ -266,6 +298,7 @@ public:
     [[nodiscard]] bool HasHLEMacroState() const override {
         return cbuf_replacements.size() != 0;
     }
+    bool HasNativeInstructions() const override;
 
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
 
@@ -274,6 +307,7 @@ private:
     ::Common::unordered_map<u32, Shader::TextureType> texture_types;
     ::Common::unordered_map<u32, Shader::TexturePixelFormat> texture_pixel_formats;
     ::Common::unordered_map<u64, u32> cbuf_values;
+    ::Common::unordered_map<u64, u8> storage_pointer_types;
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
     std::array<u32, 3> workgroup_size{};
     u32 local_memory_size{};
