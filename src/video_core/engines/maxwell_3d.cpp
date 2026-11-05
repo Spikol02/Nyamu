@@ -341,6 +341,29 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     method_sink.clear();
 }
 
+void Maxwell3D::ApplyPairs(Core::System& system, const u64* pairs, u32 count) {
+    // EDEN_NX2_RING_PAIRS: state writes the front would have sunk (never in execution_mask),
+    // applied as ConsumeSinkImpl applies the sink. The shadow RAM mode cannot change inside a
+    // block: shadow_ram_control is executable, and any other entry ends the block.
+    const auto control = shadow_state.shadow_ram_control;
+    const bool track = control == Regs::ShadowRamControl::Track ||
+                       control == Regs::ShadowRamControl::TrackWithFilter;
+    const bool replay = control == Regs::ShadowRamControl::Replay;
+    const bool skip_same = SkipSameValueWrites();
+    for (u32 i = 0; i < count; ++i) {
+        const u32 method = static_cast<u32>(pairs[i] & 0xffff);
+        u32 value = static_cast<u32>(pairs[i] >> 32);
+        if (track) {
+            shadow_state.reg_array[method] = value;
+        } else if (replay) {
+            value = shadow_state.reg_array[method];
+        }
+        if (!skip_same || regs.reg_array[method] != value) {
+            ProcessDirtyRegisters(method, value);
+        }
+    }
+}
+
 void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     // The instances after the first are drawn together once their loop ends, and they must see
     // the state they were begun with: NVN's draw macros reset the base instance (and its copy in
@@ -1031,7 +1054,16 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
             break;
         }
     }
-    split.Method(this, method, argument, from_macro || is_last_call, nullptr);
+    // EDEN_NX2_RING_PAIRS: a state write outside execution_mask goes as a pair, applied as the
+    // method sink applies it (ApplyPairs) when the back reaches it, never later than the sink.
+    if (!execution_mask[method] && VideoCommon::GpuSplit::RingPairs()) {
+        split.PairWrite(this, method, argument);
+        if (from_macro) {
+            split.CountBatched(VideoCommon::GpuSplit::Batched::MacroSunk);
+        }
+    } else {
+        split.Method(this, method, argument, from_macro || is_last_call, nullptr);
+    }
     if (method == MAXWELL3D_REG_INDEX(report_semaphore.query)) {
         FrontNoteReport(split, fs);
     }
