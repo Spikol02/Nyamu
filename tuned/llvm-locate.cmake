@@ -9,10 +9,12 @@ if(DEFINED ENV{LLVM_ROOT})
     list(APPEND _llvm_candidates "${_env_root}")
 endif()
 list(APPEND _llvm_candidates "C:/LLVM" "C:/Program Files/LLVM")
-foreach(_edition Enterprise Professional Community BuildTools)
+foreach(_vs 18 2022)
+foreach(_edition Enterprise Professional Community BuildTools Insiders)
     list(APPEND _llvm_candidates
-         "C:/Program Files/Microsoft Visual Studio/2022/${_edition}/VC/Tools/Llvm/x64"
-         "C:/Program Files (x86)/Microsoft Visual Studio/2022/${_edition}/VC/Tools/Llvm/x64")
+         "C:/Program Files/Microsoft Visual Studio/${_vs}/${_edition}/VC/Tools/Llvm/x64"
+         "C:/Program Files (x86)/Microsoft Visual Studio/${_vs}/${_edition}/VC/Tools/Llvm/x64")
+endforeach()
 endforeach()
 
 set(_llvm_bin "")
