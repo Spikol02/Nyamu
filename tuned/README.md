@@ -78,7 +78,7 @@ The sync memory off run was short, so treat it as promising, not final. Heavy tr
 
 ## Building from source
 
-You need Visual Studio with the C++ tools, Clang 23, `glslangValidator` and `patch` on `PATH`. Edit the paths in the cache files in this folder to match your machine.
+You need Visual Studio with the C++ tools, LLVM (clang-cl), `glslangValidator` and `patch` on `PATH`. The cache files find LLVM in `C:\LLVM`, `C:\Program Files\LLVM`, Visual Studio's bundled copy or on `PATH`; set `LLVM_ROOT` to use another folder. The included profile was made with Clang 23: if an older clang can't read it, set `NYAMU_PGO=0` to build without it.
 
 ```bash
 cmake -C tuned/pgo-use-cache.cmake -S . -B build/pgo-use -G Ninja

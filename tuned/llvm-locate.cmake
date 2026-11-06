@@ -1,0 +1,41 @@
+# Finds the LLVM install for the tuned cache files: LLVM_ROOT (environment or -D), then the
+# usual install folders, then clang-cl on PATH.
+set(_llvm_candidates)
+if(DEFINED LLVM_ROOT)
+    list(APPEND _llvm_candidates "${LLVM_ROOT}")
+endif()
+if(DEFINED ENV{LLVM_ROOT})
+    file(TO_CMAKE_PATH "$ENV{LLVM_ROOT}" _env_root)
+    list(APPEND _llvm_candidates "${_env_root}")
+endif()
+list(APPEND _llvm_candidates "C:/LLVM" "C:/Program Files/LLVM")
+foreach(_edition Enterprise Professional Community BuildTools)
+    list(APPEND _llvm_candidates
+         "C:/Program Files/Microsoft Visual Studio/2022/${_edition}/VC/Tools/Llvm/x64"
+         "C:/Program Files (x86)/Microsoft Visual Studio/2022/${_edition}/VC/Tools/Llvm/x64")
+endforeach()
+
+set(_llvm_bin "")
+foreach(_root IN LISTS _llvm_candidates)
+    if(EXISTS "${_root}/bin/clang-cl.exe")
+        set(_llvm_bin "${_root}/bin")
+        break()
+    endif()
+endforeach()
+if(NOT _llvm_bin)
+    find_program(_clang_cl clang-cl)
+    if(_clang_cl)
+        get_filename_component(_llvm_bin "${_clang_cl}" DIRECTORY)
+    endif()
+endif()
+if(NOT _llvm_bin)
+    message(FATAL_ERROR "clang-cl.exe not found. Set LLVM_ROOT to your LLVM folder, for example "
+                        "set LLVM_ROOT=C:\\Program Files\\LLVM")
+endif()
+message(STATUS "Using LLVM from ${_llvm_bin}")
+
+set(CMAKE_C_COMPILER "${_llvm_bin}/clang-cl.exe" CACHE FILEPATH "")
+set(CMAKE_CXX_COMPILER "${_llvm_bin}/clang-cl.exe" CACHE FILEPATH "")
+set(CMAKE_LINKER "${_llvm_bin}/lld-link.exe" CACHE FILEPATH "")
+set(CMAKE_AR "${_llvm_bin}/llvm-lib.exe" CACHE FILEPATH "")
+get_filename_component(LLVM_INSTALL_ROOT "${_llvm_bin}" DIRECTORY)
