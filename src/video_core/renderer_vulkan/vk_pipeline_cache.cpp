@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <ranges>
 #include <span>
 #include <thread>
 #include <vector>
@@ -1104,7 +1106,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         background_active.store(true, std::memory_order_release);
         background_workers.reset(new Common::ThreadWorker(threads, "VkPipelinePrebuild", {},
                                                           Common::ThreadPlacement::Background));
-        for (auto& deferred : deferred_graphics) {
+        // Newest first: the cache file appends, so the end holds what the latest sessions
+        // found, which the game is likelier to need soon than its oldest entries.
+        for (auto& deferred : std::views::reverse(deferred_graphics)) {
             background_workers->QueueWork([this, key = deferred.first,
                                            envs_ = std::move(deferred.second)]() mutable {
                 bool build = !background_stop.load(std::memory_order_relaxed);
@@ -1295,6 +1299,18 @@ void PipelineCache::EvictUnusedPipelines() {
     // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
     constexpr u64 EvictAfterFrames = 36000;
     if (frame_count <= EvictAfterFrames) {
+        return;
+    }
+    // Only while the cache is large: each one evicted is translated again on the GPU thread when
+    // its place is revisited (~10 ms). Ocarina of Time kept ~1,900 of them and evicted 3,400 in
+    // 25 minutes of play, then rebuilt 1,850 (14 s of stalls, 3.8 s in one 10 s window). 8,000
+    // pipelines are ~3.6 GB of driver memory at most. EDEN_NX2_PIPELINE_EVICT_ABOVE sets it.
+    static const size_t evict_above = [] {
+        const char* value = std::getenv("EDEN_NX2_PIPELINE_EVICT_ABOVE");
+        return value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10))
+                                : size_t{8000};
+    }();
+    if (graphics_cache.size() <= evict_above) {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
