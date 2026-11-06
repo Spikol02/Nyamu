@@ -15,7 +15,7 @@
   </property>
   <property name="windowIcon">
    <iconset resource="yuzu.qrc">
-    <normaloff>:/img/lichii.ico</normaloff>:/img/lichii.ico</iconset>
+    <normaloff>:/img/nyamu.ico</normaloff>:/img/nyamu.ico</iconset>
   </property>
   <property name="tabShape">
    <enum>QTabWidget::TabShape::Rounded</enum>
