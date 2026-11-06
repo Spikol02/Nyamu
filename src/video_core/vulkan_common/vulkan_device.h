@@ -1048,6 +1048,11 @@ FN_MAX_LIMIT_LIST
         return has_broken_parallel_compiling;
     }
 
+    /// Returns true for AMD GCN4 and older (Polaris and earlier) on AMD's own drivers.
+    bool IsAmdLegacyGcn() const {
+        return is_amd_legacy_gcn;
+    }
+
     /// Returns the vendor name reported from Vulkan.
     std::string_view GetVendorName() const {
         return properties.driver.driverName;
@@ -1359,6 +1364,7 @@ private:
     bool has_broken_cube_compatibility{};      ///< Has broken cube compatibility bit
     bool has_broken_descriptor_aliasing{};     ///< Miscompiles descriptors aliased on one binding
     bool has_broken_parallel_compiling{};      ///< Has broken parallel shader compiling.
+    bool is_amd_legacy_gcn{};                  ///< AMD GCN4 or older on an AMD driver.
     bool has_renderdoc{};                      ///< Has RenderDoc attached
     bool has_nsight_graphics{};                ///< Has Nsight Graphics attached
     bool has_radeon_gpu_profiler{};            ///< Has Radeon GPU Profiler attached.

@@ -338,7 +338,7 @@ const char* StageTag(size_t index) {
     return index < 6 ? tags[index] : "xx";
 }
 
-size_t GetTotalPipelineWorkers() {
+size_t GetTotalPipelineWorkers(const Device& device) {
     const size_t logical_threads =
         std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL);
     const size_t max_core_threads = logical_threads - 1ULL;
@@ -347,6 +347,14 @@ size_t GetTotalPipelineWorkers() {
         if (parsed > 0) {
             return std::min<size_t>(static_cast<size_t>(parsed), max_core_threads);
         }
+    }
+    // AMD's legacy Polaris driver uses a lot of RAM per compile of a large Switch 2 shader, and
+    // one build per core is the likely cause of the RX 580 running out of RAM after the intro.
+    if (device.IsAmdLegacyGcn()) {
+        LOG_WARNING(Render_Vulkan,
+                    "AMD GCN4 or older: limiting pipeline build threads to 2 "
+                    "(EDEN_NX2_PIPELINE_WORKERS overrides)");
+        return std::min<size_t>(max_core_threads, 2ULL);
     }
 #ifdef __ANDROID__
     const int configured = AndroidSettings::values.pipeline_worker_count.GetValue();
@@ -422,7 +430,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue() &&
                                 !DriverCachesPipelines(device_)},
-      workers(device.HasBrokenParallelShaderCompiling() ? 1ULL : GetTotalPipelineWorkers(),
+      workers(device.HasBrokenParallelShaderCompiling() ? 1ULL : GetTotalPipelineWorkers(device),
               "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {},
                            Common::ThreadPlacement::Background) {
