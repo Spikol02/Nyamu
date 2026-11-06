@@ -1,0 +1,117 @@
+name: build-windows
+
+# Builds the Windows binaries with MSVC (adapted from Djihads80/Eglantine's build-windows.yml).
+# The result is uploaded as the workflow run's artifact.
+on:
+  push:
+    branches: [polaris-fixes]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  msvc:
+    name: windows-x86_64
+    runs-on: windows-2022
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: 3G
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Write SCM files
+        shell: bash
+        run: |
+          printf '%s\n' "$GITHUB_SHA" > GIT-COMMIT
+          printf '%s\n' "$GITHUB_REF_NAME" > GIT-REFSPEC
+          printf '%s\n' "$GITHUB_REF_NAME-${GITHUB_SHA::10}" > GIT-TAG
+
+      - name: Cache CPM downloads
+        uses: actions/cache@v4
+        with:
+          path: .cache/cpm
+          key: cpm-${{ runner.os }}-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'src/**/CMakeLists.txt') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: Cache compiler objects
+        uses: actions/cache@v4
+        with:
+          path: .sccache
+          key: objects-windows-msvc-${{ github.sha }}
+          restore-keys: |
+            objects-windows-msvc-
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install sccache
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'sccache.zip'
+          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-x86_64-pc-windows-msvc.zip
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
+          $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Configure
+        shell: bash
+        run: >-
+          cmake -S . -B build/release -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=OFF
+          -DYUZU_TESTS=OFF
+          -DYUZU_CMD=ON
+          -DYUZU_ROOM=OFF
+          -DYUZU_ROOM_STANDALONE=OFF
+          -DYUZU_USE_BUNDLED_QT=OFF
+          -DYUZU_USE_BUNDLED_SDL3=ON
+          -DENABLE_UPDATE_CHECKER=OFF
+          -DUSE_DISCORD_PRESENCE=OFF
+          -DENABLE_WERROR=OFF
+          -DCMAKE_C_COMPILER_LAUNCHER=sccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build build/release --target yuzu yuzu-cmd --parallel
+          sccache --show-stats
+
+      - name: Package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "build/release/bin/eglantine.exe")) {
+            throw "build/release/bin/eglantine.exe was not produced"
+          }
+          windeployqt --release --no-translations build/release/bin/eglantine.exe
+          if (Test-Path "dist/nx2_switches.txt") {
+            Copy-Item dist/nx2_switches.txt build/release/bin/
+          }
+          Get-ChildItem build/release/bin -Filter *.pdb | Remove-Item
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: eglantine-windows-x86_64-${{ github.sha }}
+          path: build/release/bin/
+          if-no-files-found: error
+          retention-days: 14
