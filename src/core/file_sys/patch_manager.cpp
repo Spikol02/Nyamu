@@ -543,8 +543,10 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             continue;
         }
         if (patch.build_id != build_id) {
-            LOG_INFO(Loader, "    - Skipping \"{}\": build id {} is not {}", patch.name, build_id,
-                     patch.build_id);
+            LOG_WARNING(Loader,
+                        "    - Skipping \"{}\": this game version's {} has build id {}; the patch is "
+                        "made for {}",
+                        patch.name, name, build_id, patch.build_id);
             continue;
         }
         // Every write must find what it expects in the unpatched module, and none may already
@@ -561,23 +563,35 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             const u8* const original = nso.data() + offset;
             u32 word{};
             std::memcpy(&word, original, sizeof(word));
-            bool expected = false;
+            // Word: the exact original, or the patch is skipped. BranchLink and Zero are what the
+            // patch was made against; the build id already pins the module, as it does for the
+            // community mod file, so a difference there is only logged.
             switch (write.check) {
             case BuiltinCheck::Word:
-                expected = word == write.original;
+                if (word != write.original) {
+                    LOG_WARNING(Loader,
+                                "    - Skipping \"{}\": {}+{:#x} holds {:#010x}, expected {:#010x}",
+                                patch.name, name, write.module_offset, word, write.original);
+                    applicable = false;
+                }
                 break;
             case BuiltinCheck::BranchLink:
-                expected = (word & 0xFC000000U) == 0x94000000U;
+                if ((word & 0xFC000000U) != 0x94000000U) {
+                    LOG_WARNING(Loader, "    - \"{}\": {}+{:#x} holds {:#010x}, not a BL; patching anyway",
+                                patch.name, name, write.module_offset, word);
+                }
                 break;
             case BuiltinCheck::Zero:
-                expected = std::all_of(original, original + write.bytes.size(),
-                                       [](u8 byte) { return byte == 0; });
+                if (!std::all_of(original, original + write.bytes.size(),
+                                 [](u8 byte) { return byte == 0; })) {
+                    LOG_WARNING(Loader,
+                                "    - \"{}\": {}+{:#x} is not empty (first word {:#010x}); patching "
+                                "anyway",
+                                patch.name, name, write.module_offset, word);
+                }
                 break;
             }
-            if (!expected) {
-                LOG_WARNING(Loader, "    - Skipping \"{}\": {}+{:#x} holds {:#010x}, not what it patches",
-                            patch.name, name, write.module_offset, word);
-                applicable = false;
+            if (!applicable) {
                 break;
             }
             if (std::memcmp(out.data() + offset, original, write.bytes.size()) != 0) {

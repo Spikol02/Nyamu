@@ -133,6 +133,22 @@ Performance build 5 merged with zortos293/Lichii build-67 and its Ocarina of Tim
 - **The framerate isn't perfect yet:** about 26-28 fps in Kokiri Forest on a Ryzen 5 5500 with an RTX 3050, lower in the busiest views. The emulator's GPU threads are the limit, not the graphics card. Work on it continues.
 - Some shader stutter the first time new areas load.
 
+## Performance build 8: Ocarina of Time speed-ups (fix 25)
+
+Performance build 7 plus speed-ups ported from Frizti/Lichii's frizti-v2 branch, AMD shader fixes from MythosOfs/Orchid, and a wider check for the built-in patches.
+
+- **Fewer GPU thread stalls (999sian):** the split GPU thread waits for work on events instead of spinning, which frees a CPU core, and Ocarina of Time presents one frame ahead instead of waiting for each frame's GPU fence. The one-frame-ahead present adds a frame of input latency; `EDEN_NX2_FRAMES_AHEAD=0` in `nx2_switches.txt` turns it off.
+- **Bigger GPU submissions (999sian):** up to 4096 draws per native submission, with fragment barriers deferred across unrelated draws.
+- **Cheaper timing (999sian):** an invariant-TSC calibrated host clock and an inlined guest counter read.
+- **Uniform uploads (Matt Artist):** native programs' 64 KiB uniform banks upload without page protection churn.
+- **Memory lookups (zortos293):** continuous-range answers come from cached page runs, keyed by 4 KiB page because Ocarina of Time shares big pages between allocations.
+- **Deferred work (chuppatricky, Dr. Sergio):** deferred submissions go out before waiting on pending fences and fence callbacks, so those waits no longer stall on work that was never sent.
+- **Split writers (Frizti):** only compute and DMA methods that write memory count as writers for the split GPU thread's waits.
+- **Built-in patches:** a mismatched hook or code area is logged instead of skipping the patch, and a version mismatch names both build ids, so Dynamic FPS and Max Resolution apply to more dumps of the same game version.
+- **AMD (MythosOfs/Orchid):** nested returns are counted before demotes move to the end of a fragment shader (a black scene on AMD), the AMDVLK shuffle workaround needs 32-wide subgroups, and mesh and task shaders are left out of it.
+- **Events:** unsignalled MWAITX wakes retry until the event's deadline (zortos293).
+- **Diagnostics:** the log names each compute shader the first time it runs and every GPU wait of half a second or more; `EDEN_NX2_SKIP_COMPUTE=hash,hash` skips listed compute shaders for testing.
+
 ## License and AI disclosure
 
 GPL-3.0-or-later, the same as the projects it's based on. See `LICENSE.txt`.

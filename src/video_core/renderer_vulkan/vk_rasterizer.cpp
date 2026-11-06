@@ -16,7 +16,9 @@
 #include <set>
 #include <fstream>
 #include <mutex>
+#include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include <fmt/format.h>
@@ -1687,6 +1689,42 @@ void RasterizerVulkan::DispatchCompute() {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");
         return;
     }
+    {
+        // Each compute shader's first dispatch is logged, so a GPU hang
+        // shows which new shader ran last. EDEN_NX2_SKIP_COMPUTE=hash,hash skips those shaders.
+        static const std::unordered_set<u64> skip_compute{[] {
+            std::unordered_set<u64> hashes;
+            if (const char* value = std::getenv("EDEN_NX2_SKIP_COMPUTE")) {
+                std::string_view list{value};
+                while (!list.empty()) {
+                    const size_t comma = list.find(',');
+                    std::string item{list.substr(0, comma)};
+                    std::erase_if(item, [](char c) { return c == ' ' || c == '\t'; });
+                    if (!item.empty()) {
+                        hashes.insert(std::strtoull(item.c_str(), nullptr, 16));
+                    }
+                    list = comma == std::string_view::npos ? std::string_view{}
+                                                           : list.substr(comma + 1);
+                }
+            }
+            return hashes;
+        }()};
+        static std::unordered_set<u64> dispatched_compute;
+        const u64 hash = pipeline->ShaderHash();
+        const bool skipped = skip_compute.contains(hash);
+        if (dispatched_compute.insert(hash).second) {
+            const auto& launch = kepler_compute->launch_description;
+            LOG_INFO(Render_Vulkan,
+                     "Nx2 first dispatch: compute {:016x} grid {}x{}x{} block {}x{}x{}{}", hash,
+                     launch.grid_dim_x.Value(), launch.grid_dim_y.Value(),
+                     launch.grid_dim_z.Value(), launch.block_dim_x.Value(),
+                     launch.block_dim_y.Value(), launch.block_dim_z.Value(),
+                     skipped ? " (skipped: EDEN_NX2_SKIP_COMPUTE)" : "");
+        }
+        if (skipped) {
+            return;
+        }
+    }
     std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
     std::optional<ByteAddressedShadow> byte_addressed_shadow;
     buffer_cache.Nx2CollectListCopies(true);
@@ -1811,7 +1849,7 @@ void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 in
 void RasterizerVulkan::FlushAll() {}
 
 void RasterizerVulkan::SubmitNx2ListCopies() {
-    if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick()) && !scheduler.DeferFlush()) {
+    if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick())) {
         scheduler.Flush();
     }
 }
@@ -2160,12 +2198,7 @@ void RasterizerVulkan::WaitForIdle() {
 }
 
 void RasterizerVulkan::FragmentBarrier() {
-    if (device.IsMoltenVK()) {
-        scheduler.DeferFragmentBarrier();
-        return;
-    }
-    // We already put barriers when a render pass finishes
-    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.DeferFragmentBarrier();
 }
 
 void RasterizerVulkan::TiledCacheBarrier() {
@@ -2503,21 +2536,22 @@ void RasterizerVulkan::FlushWork() {
     static constexpr bool android = false;
 #endif // __ANDROID__
     const bool native = gpu_memory->UsesNativeTiling();
-    u32 budget = SubmissionPolicy::DefaultNativeBudget;
+    const u32 default_native_budget =
+        device.IsMoltenVK() ? SubmissionPolicy::DefaultNativeBudget : 4096U;
+    u32 budget = default_native_budget;
     if (native && !android) {
-        static const u32 configured_budget = [] {
+        static const std::optional<u32> configured_budget = []() -> std::optional<u32> {
             if (const char* value = std::getenv("EDEN_NX2_FLUSH_DRAWS")) {
                 if (const auto parsed = SubmissionPolicy::ParseBudget(value)) {
-                    return *parsed;
+                    return parsed;
                 }
                 LOG_WARNING(Render_Vulkan,
-                            "Invalid EDEN_NX2_FLUSH_DRAWS; expected an integer from 1 to {}, "
-                            "using {}",
-                            (std::numeric_limits<u32>::max)(), SubmissionPolicy::DefaultNativeBudget);
+                            "Invalid EDEN_NX2_FLUSH_DRAWS; expected an integer from 1 to {}",
+                            (std::numeric_limits<u32>::max)());
             }
-            return SubmissionPolicy::DefaultNativeBudget;
+            return std::nullopt;
         }();
-        budget = configured_budget;
+        budget = configured_budget.value_or(default_native_budget);
     }
     u32 legacy_budget = 4096;
     if (!native && !android) {

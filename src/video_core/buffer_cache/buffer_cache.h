@@ -161,6 +161,17 @@ void BufferCache<P>::TickFrame() {
 
     const bool skip_preferred = hits * 256 < shots * 251;
     channel_state->uniform_buffer_skip_cache_size = skip_preferred ? DEFAULT_SKIP_CACHE_SIZE : 0;
+    // EDEN_NX2_UBO_SKIP_SIZE=<bytes>: uniform buffers up to this size are copied into the stream
+    // buffer at every bind; larger ones bind the cached buffer directly (re-uploaded only when
+    // written). 0 binds every uniform buffer from the cache. Unset: the hit-rate choice above.
+    static const int ubo_skip_size = [] {
+        const char* value = std::getenv("EDEN_NX2_UBO_SKIP_SIZE");
+        return value == nullptr ? -1 : std::atoi(value);
+    }();
+    if (ubo_skip_size >= 0) {
+        channel_state->uniform_buffer_skip_cache_size =
+            (std::min)(static_cast<u32>(ubo_skip_size), DEFAULT_SKIP_CACHE_SIZE);
+    }
 
     // If we can obtain the memory info, use it instead of the estimate.
     if (runtime.CanReportMemoryUsage()) {
@@ -1446,6 +1457,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // Native programs keep tables next to their code in a 64 KiB bank read with indirect offsets
     // (Splatoon Raiders: the dialogue box corners in c1). Writes to that memory can go unnoticed by
     // the memory tracker, leaving stale host contents, so upload such a bank again once per frame.
+    // Copied directly: marking it CPU-modified unprotected and reprotected its pages each frame.
     if (has_host_buffer && (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000 &&
         size != 0 && gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
         !memory_tracker.IsRegionGpuModified(device_addr, size) &&
@@ -1456,8 +1468,14 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                device_memory.template GetPointer<u8>(device_addr + mapped_size) != nullptr) {
             mapped_size += Core::DEVICE_PAGESIZE - ((device_addr + mapped_size) & Core::DEVICE_PAGEMASK);
         }
-        if (mapped_size != 0) {
-            memory_tracker.MarkRegionAsCpuModified(device_addr, (std::min<u64>)(mapped_size, size));
+        const u64 upload_size = (std::min<u64>)(mapped_size, size);
+        if (upload_size != 0) {
+            std::array<BufferCopy, 1> copies{BufferCopy{
+                .src_offset = 0,
+                .dst_offset = buffer.Offset(device_addr),
+                .size = upload_size,
+            }};
+            UploadMemory(buffer, upload_size, upload_size, copies);
         }
     }
     const bool use_fast_buffer = needs_alignment_stream

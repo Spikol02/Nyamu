@@ -25,6 +25,7 @@
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
+#include "video_core/gpu_wait_site.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_parallel_record.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -230,6 +231,7 @@ public:
             if (tick >= master_semaphore->CurrentTick()) {
                 Flush();
             }
+            VideoCommon::BackWaitScope wait_scope{"Scheduler::Wait (host GPU execution)"};
             master_semaphore->Wait(tick);
         }
         const auto trace_waited = trace ? std::chrono::steady_clock::now()

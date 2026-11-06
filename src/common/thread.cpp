@@ -6,12 +6,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
-#include <limits>
 #include <string>
 #include <thread>
 
 #include "common/adpf.h"
 #include "common/error.h"
+#include "common/event_wait.h"
 #include "common/logging.h"
 #include "common/nx2_sample_profile.h"
 #include "common/assert.h"
@@ -631,6 +631,89 @@ void PollThreadPolicies() {
 #endif
 }
 
+#ifdef _WIN32
+Event::~Event() {
+    if (timed_wait_event) {
+        CloseHandle(timed_wait_event);
+    }
+}
+
+void Event::WakeTimedWaiters() {
+    if (timed_wait_event) {
+        SetEvent(timed_wait_event);
+    }
+}
+
+bool Event::WaitForWin32Fallback(const std::chrono::nanoseconds time) {
+    std::unique_lock lk{mutex};
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+    const auto deadline = Clock::time_point{EventWaitDeadline(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()), time)};
+    while (!is_set.load()) {
+        if (Clock::now() >= deadline) {
+            return false;
+        }
+        struct Timer {
+            Timer() {
+                handle = CreateWaitableTimerExW(nullptr, nullptr,
+                                                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                TIMER_MODIFY_STATE | SYNCHRONIZE);
+                if (!handle) {
+                    handle = CreateWaitableTimerExW(nullptr, nullptr, 0,
+                                                    TIMER_MODIFY_STATE | SYNCHRONIZE);
+                }
+            }
+            ~Timer() {
+                if (handle) {
+                    CloseHandle(handle);
+                }
+            }
+            HANDLE handle{};
+        };
+        static thread_local Timer timer;
+        if (!timed_wait_event) {
+            timed_wait_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        }
+        const auto remaining = deadline - Clock::now();
+        if (remaining <= Clock::duration::zero()) {
+            return false;
+        }
+        const auto step = (std::min<Clock::duration>)(remaining, std::chrono::hours{24});
+        if (timed_wait_event) {
+            ResetEvent(timed_wait_event);
+            using TimerTicks = std::chrono::duration<s64, std::ratio<1, 10'000'000>>;
+            LARGE_INTEGER due{};
+            due.QuadPart = -std::chrono::ceil<TimerTicks>(step).count();
+            const bool armed =
+                timer.handle && SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0);
+            const HANDLE handles[]{timed_wait_event, timer.handle};
+            const auto milliseconds = std::chrono::ceil<std::chrono::milliseconds>(step);
+            const DWORD timeout =
+                static_cast<DWORD>((std::min<s64>)(milliseconds.count(), INFINITE - 1));
+            lk.unlock();
+            const DWORD result = armed ? WaitForMultipleObjects(2, handles, FALSE, INFINITE)
+                                       : WaitForSingleObject(timed_wait_event, timeout);
+            if (armed) {
+                CancelWaitableTimer(timer.handle);
+            }
+            lk.lock();
+            if (result != WAIT_FAILED) {
+                continue;
+            }
+        }
+        const auto rem2 = deadline - Clock::now();
+        if (rem2 > Clock::duration::zero()) {
+            const auto fallback = std::chrono::ceil<std::chrono::milliseconds>(
+                (std::min<Clock::duration>)(rem2, std::chrono::hours{24}));
+            condvar.wait_for(lk, fallback, [this] { return is_set.load(); });
+        }
+    }
+    is_set = false;
+    return true;
+}
+#endif
+
 #ifdef ARCHITECTURE_x86_64
 // On Linux and UNIX systems, a futex would nominally be used to cover the costs
 // the idea is that it's intuitivelly cheaper to use a direct instruction as opposed to a full futex call
@@ -648,31 +731,29 @@ __attribute__((target("waitpkg,mwaitx")))
 #endif
 bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #ifdef _WIN32
-    auto const start = Common::X64::FencedRDTSC();
     auto const& caps = Common::g_cpu_caps;
-    [[maybe_unused]] auto const end = start + Common::g_wall_clock.NsToTicks(time);
     if (caps.monitorx) {
+        const auto deadline = EventWaitDeadline(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()), time);
+        const u64 ticks_per_second = Common::g_wall_clock.NsToTicks(std::chrono::seconds{1});
         while (true) {
             // Armed monitor, as per manual, MWAITX must be conditional if the condition isn't satisfied
             // to prevent a race condition.
             _mm_monitorx(reinterpret_cast<u64*>(std::addressof(is_set)), 0, 0);
             if (!is_set.load()) {
-                // RDTSC may be fenced here due to atomic load
-#ifdef _MSC_VER
-                auto const now = __rdtsc();
-#else
-                auto const now = _rdtsc();
-#endif
-                if (end > now) {
-                    u32 const cycles = std::min<u32>((std::numeric_limits<u32>::max)(), s64(end) - s64(now));
+                const u32 cycles = MwaitxTimeoutCycles(
+                    deadline - std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch()),
+                    ticks_per_second);
+                if (cycles != 0) {
                     // See here: https://github.com/torvalds/linux/blob/948a64995aca6820abefd17f1a4258f5835c5ad9/arch/x86/lib/delay.c#L93
                     // MWAITX accepts a 32-bit input timer which determines the total number of cycles to wait for
                     // NOT THE TOTAL ABSOLUTE TSC VALUE, it's just a delta
                     // BIT[1] = use a timer
                     // Hint = 0: Use C1 state when sleepy (means slower wakeup but better savings)
                     _mm_mwaitx(1 << 1, 0u, cycles);
-                    if (!is_set.load())
-                        return false;
+                    continue;
                 } else
                     return false; //timeout
             }
@@ -680,7 +761,9 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
             if (is_set.compare_exchange_weak(expected, false, std::memory_order_release))
                 return true;
         }
-    } else if (caps.waitpkg) {
+    }
+    const u64 end = Common::X64::FencedRDTSC() + Common::g_wall_clock.NsToTicks(time);
+    if (caps.waitpkg) {
         // #UD If CPUID.7.0:ECX.WAITPKG[bit 5]=0.
         while (true) {
             _umonitor(std::addressof(is_set));
@@ -690,21 +773,14 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
             if (is_set.compare_exchange_weak(expected, false, std::memory_order_release))
                 return true;
         }
-    } else {
-#ifdef _MSC_VER
-        while (!is_set.load() && end > __rdtsc())
-            Common::Windows::SleepForOneTick();
-#else
-        while (!is_set.load() && end > _rdtsc())
-            Common::Windows::SleepForOneTick();
-#endif
-        if (is_set.load())
-            Reset();
-        return true;
     }
+    return WaitForWin32Fallback(time);
 #else
     std::unique_lock lk{mutex};
-    if (!condvar.wait_for(lk, time, [this] { return is_set.load(); }))
+    const auto now = std::chrono::steady_clock::now();
+    const auto deadline = std::chrono::steady_clock::time_point{EventWaitDeadline(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()), time)};
+    if (!condvar.wait_until(lk, deadline, [this] { return is_set.load(); }))
         return false;
     is_set = false;
     return true;
@@ -713,15 +789,13 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #else
 bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #ifdef _WIN32
-    auto const end = Common::g_wall_clock.GetTimeNS() + time;
-    while (!is_set.load() && end > Common::g_wall_clock.GetTimeNS())
-        Common::Windows::SleepForOneTick();
-    if (is_set.load())
-        Reset();
-    return true;
+    return WaitForWin32Fallback(time);
 #else
     std::unique_lock lk{mutex};
-    if (!condvar.wait_for(lk, time, [this] { return is_set.load(); }))
+    const auto now = std::chrono::steady_clock::now();
+    const auto deadline = std::chrono::steady_clock::time_point{EventWaitDeadline(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()), time)};
+    if (!condvar.wait_until(lk, deadline, [this] { return is_set.load(); }))
         return false;
     is_set = false;
     return true;

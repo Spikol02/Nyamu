@@ -91,11 +91,16 @@ Id GuestLane(EmitContext& ctx, Id index) {
 }
 
 Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {
-    if (!ctx.profile.has_broken_spirv_subgroup_shuffle) {
+    const bool replace_dynamic_shuffle =
+        ctx.profile.has_broken_spirv_dynamic_subgroup_shuffle && ctx.stage != Stage::Compute;
+    if (!ctx.profile.has_broken_spirv_subgroup_shuffle && !replace_dynamic_shuffle) {
         return ctx.OpGroupNonUniformShuffle(ctx.U32[1], SubgroupScope(ctx), value, src_thread_id);
     }
     Id result{ctx.u32_zero_value};
-    for (u32 lane = 0; lane < ctx.profile.max_subgroup_size; ++lane) {
+    // The AMD path is enabled per stage only with an enforced 32-lane subgroup.
+    // Qualcomm retains its full host-subgroup fallback.
+    const u32 loop_lanes = replace_dynamic_shuffle ? 32U : ctx.profile.max_subgroup_size;
+    for (u32 lane = 0; lane < loop_lanes; ++lane) {
         const Id read{
             ctx.OpGroupNonUniformBroadcast(ctx.U32[1], SubgroupScope(ctx), value, ctx.Const(lane))};
         const Id matches{ctx.OpIEqual(ctx.U1, src_thread_id, ctx.Const(lane))};
