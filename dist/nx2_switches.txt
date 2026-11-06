@@ -11,6 +11,15 @@
 # Offload GPU method/macro execution to the back thread (SPLIT=2 delivers up to +54% FPS alone).
 EDEN_NX2_SPLIT=2
 
+# Fewer waits between the two GPU threads (the speed switches of the earlier performance
+# builds). Ocarina of Time spent about 480 ms a second with the first thread waiting without
+# them. Delete a line if something flickers or draws wrong.
+EDEN_NX2_DMA_RANGES=1
+EDEN_NX2_LIST_TRUST=1
+EDEN_NX2_ACQUIRE_PEEK=1
+EDEN_NX2_ACQUIRE_QUEUED=gequal
+EDEN_NX2_CMD_BATCH=1
+
 #EDEN_NX2_3D_HISTORY=
 #EDEN_NX2_3D_METHODS=
 #EDEN_NX2_A2C_REFRESH=
