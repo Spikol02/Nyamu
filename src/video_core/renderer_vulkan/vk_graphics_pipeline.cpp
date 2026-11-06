@@ -296,6 +296,7 @@ GraphicsPipeline::GraphicsPipeline(
         num_descriptor_entries += NumDescriptorEntries(*info);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
+    fragment_writes_color = stage_infos[NUM_STAGES - 1].stores_frag_color;
     const auto any_written = [](const auto& descriptors) {
         return std::ranges::any_of(descriptors, [](const auto& desc) { return desc.is_written; });
     };
@@ -770,6 +771,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         texture_cache.UpdateRenderTargets(false);
         const std::span<const VideoCommon::ImageViewInOut> view_span{views.data(), views.size()};
         texture_cache.CheckFeedbackLoop(view_span);
+        if (static const bool keep_views = std::getenv("EDEN_NX2_FRAME_DUMP_INPUTS_PS") != nullptr;
+            keep_views) {
+            dump_views.clear();
+            for (const auto& view : views) {
+                dump_views.push_back(view.id);
+            }
+        }
         if (scheduler.TakeFragmentBarrier() &&
             (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
             scheduler.RequestOutsideRenderPassOperationContext();
@@ -1213,7 +1221,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .depthTestEnable = dynamic.depth_test_enable,
         .depthWriteEnable = dynamic.depth_write_enable,
         .depthCompareOp = dynamic.depth_test_enable
-                              ? MaxwellToVK::ComparisonOp(dynamic.DepthTestFunc())
+                              ? MaxwellToVK::DepthTestOp(dynamic.DepthTestFunc())
                               : VK_COMPARE_OP_ALWAYS,
         .depthBoundsTestEnable = dynamic.depth_bounds_enable && device.IsDepthBoundsSupported(),
         .stencilTestEnable = dynamic.stencil_enable,
@@ -1239,6 +1247,11 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         VkColorComponentFlags write_mask{};
         for (size_t i = 0; i < mask_table.size(); ++i) {
             write_mask |= mask[i] ? mask_table[i] : 0;
+        }
+        // A target the fragment shader never writes gets undefined values in Vulkan; AMD's
+        // drivers store garbage (dark outlines around Ocarina's castle from a depth-test pass).
+        if (index >= fragment_writes_color.size() || !fragment_writes_color[index]) {
+            write_mask = 0;
         }
         cb_attachments.push_back({
             .blendEnable = blend.enable != 0,

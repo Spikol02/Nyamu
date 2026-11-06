@@ -51,6 +51,7 @@ enum class BuiltinCheck : u8 {
     Word,       ///< exactly `original` (a 4-byte write)
     BranchLink, ///< any BL instruction (a hooked call; the game's target is not fixed)
     Zero,       ///< all zero bytes (unused space a patch puts new code in)
+    LoadW8,     ///< a load into w8 (a switch the game reads; replaced by `mov w8, wzr`)
 };
 
 struct BuiltinWrite {
@@ -101,7 +102,27 @@ constexpr std::array OOT_DYNAMIC_FPS_WRITES{
                  .check = BuiltinCheck::Zero},
 };
 
+// Occlusion Off (cLohan's OcclusionOff_ZPrePassAndSamplesQuery mod, via sharkiix v2): `mov w8,
+// wzr` where the game reads its occlusion query, depth pre-pass and samples query switches, so it
+// skips that work (about +25% FPS in Kokiri village on sharkiix's RX 9060 XT).
+constexpr std::array<u8, 4> OOT_MOV_W8_WZR{0xE8, 0x03, 0x1F, 0x2A};
+constexpr std::array OOT_OCCLUSION_OFF_WRITES{
+    BuiltinWrite{.module_offset = 0x11ACF68, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
+    BuiltinWrite{.module_offset = 0x11B838C, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
+    BuiltinWrite{.module_offset = 0x11B83A4, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
+    BuiltinWrite{.module_offset = 0x11ACFC8, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
+    BuiltinWrite{.module_offset = 0x11B83DC, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
+    BuiltinWrite{.module_offset = 0x11B83F4, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
+};
+
 constexpr std::array BUILTIN_PATCHES{
+    BuiltinPatch{
+        .name = "Occlusion Off (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .writes = OOT_OCCLUSION_OFF_WRITES,
+    },
     BuiltinPatch{
         .name = "Max Resolution (built-in)",
         .title_id = 0x0400486024DEC000,
@@ -587,6 +608,15 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                     LOG_WARNING(Loader,
                                 "    - \"{}\": {}+{:#x} is not empty (first word {:#010x}); patching "
                                 "anyway",
+                                patch.name, name, write.module_offset, word);
+                }
+                break;
+            case BuiltinCheck::LoadW8:
+                // Loads and stores have bits 27-29 set; Rt (bits 0-4) is w8.
+                if ((word & 0x1FU) != 8 || ((word >> 27) & 7U) != 7U) {
+                    LOG_WARNING(Loader,
+                                "    - \"{}\": {}+{:#x} holds {:#010x}, not a load into w8; "
+                                "patching anyway",
                                 patch.name, name, write.module_offset, word);
                 }
                 break;

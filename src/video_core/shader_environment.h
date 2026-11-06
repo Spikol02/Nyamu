@@ -97,6 +97,7 @@ public:
     }
 
     [[nodiscard]] bool CanBeSerialized() const noexcept;
+    [[nodiscard]] const char* DebugWhyNotSerializable() const noexcept;
 
     [[nodiscard]] u64 CalculateHash() const;
 
@@ -119,6 +120,8 @@ protected:
     std::shared_ptr<const LoweredNativeCode> LowerNativeCode(u32 source_header_size,
                                                           bool geometry_stage);
     size_t native_source_size{};
+    /// Reject matrix multiplies (KeplerCompute::EmulatesNativeTensorPrograms).
+    bool reject_native_matrix{};
     std::shared_ptr<const LoweredNativeCode> lowered_native;
 
     Tegra::Texture::TICEntry ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
@@ -130,6 +133,7 @@ protected:
     std::vector<u64> code;
     ::Common::unordered_map<u32, Shader::TextureType> texture_types;
     ::Common::unordered_map<u32, Shader::TexturePixelFormat> texture_pixel_formats;
+    ::Common::unordered_map<u32, Tegra::Texture::TICEntry> texture_descriptors;
     ::Common::unordered_map<u64, u32> cbuf_values;
     ::Common::unordered_map<u64, u8> storage_pointer_types; ///< IsCbufStorageBufferPointer answers
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
@@ -262,6 +266,8 @@ public:
     FileEnvironment(const FileEnvironment&) = delete;
 
     void Deserialize(std::ifstream& file);
+
+    [[nodiscard]] size_t MemorySize() const;
 
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 

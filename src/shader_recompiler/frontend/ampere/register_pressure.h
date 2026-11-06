@@ -55,6 +55,8 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x923:
     case 0x820:
     case 0xa20:
+    case 0xc20: // FADD Rd, Ra, URb
+    case 0xc21: // FMUL Rd, Ra, URb
     case 0x421:
         operand(16);
         operand(24);
@@ -145,7 +147,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0x810:
     case 0xa10:
-    case 0xc10:
     case 0x812:
     case 0x824:
     case 0x823:
@@ -153,6 +154,14 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x424:
     case 0x423: // FFMA Rd, Ra, imm32, Rc (Ocarina's foliage colour pass: Rc in the shadowed range)
     case 0x624:
+    // Uniform-operand forms (Rb is a UR in bits 32-39, not a GPR): Rd, Ra, Rc as the immediate
+    // forms. LOP3 Rd, Ra, URb, Rc: Ocarina's Gerudo Valley mesh program, Ra in the shadowed range.
+    case 0xc10:
+    case 0xc11:
+    case 0xc12:
+    case 0xc19:
+    case 0xc23:
+    case 0xc24:
         operand(16);
         operand(24);
         operand(64);
@@ -166,6 +175,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0x419:
     case 0x819:
+    case 0xa19: // SHF Rd, Ra, c[][], Rc
         operand(16);
         operand(24);
         operand(64);
@@ -173,6 +183,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x210:
     case 0x211:
     case 0x212:
+    case 0x219: // SHF Rd, Ra, Rb, Rc (Ocarina's outdoor graphics: Ra/Rd in the shadowed range)
         operand(16);
         operand(24);
         operand(32);

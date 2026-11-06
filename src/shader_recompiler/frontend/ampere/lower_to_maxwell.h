@@ -28,6 +28,8 @@ enum class TessellationStage {
 struct LoweringOptions {
     bool geometry{};
     bool tensor{};
+    /// Reject matrix multiplies instead of emulating them (KeplerCompute::EmulatesNativeTensorPrograms).
+    bool reject_matrix{};
     u64 native_code_address{};
     std::span<const u32> verified_traps{};
     TessellationStage tessellation_stage = TessellationStage::None;
@@ -1134,9 +1136,10 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const u32 target = uniform_register(uniform_dest);
             const u32 index_target = opcode == 0xabb ? uniform_register(index_reg) : 255U;
             if (target == ~0U || target == 255 || (!subword_load && width != 4 && width != 5) ||
-                (subword_load && offset >= 0x8000) ||
+                (opcode == 0xab9 && subword_load && offset >= 0x8000) ||
                 (width == 5 && ((uniform_dest & 1) || uniform_register(uniform_dest + 1) != target + 1)) ||
-                bank() >= 18 || offset % alignment || insn.Bits(62, 2) ||
+                // An index register can align the offset (Ocarina's sky: c[4][UR15 + 0x29]).
+                bank() >= 18 || (opcode == 0xab9 && offset % alignment) || insn.Bits(62, 2) ||
                 (insn.words[2] & ~0xe00U) != (opcode == 0xab9 ? 0U : 0x08000000U) ||
                 index_target == ~0U)
                 return fail(index, "native uniform constant load mode");
@@ -1797,6 +1800,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             break;
         }
         case 0x23c: { // HMMA.1688/.16816.F16, software warp expansion (no tensor extension required).
+            if (options.reject_matrix) return fail(index, "native matrix multiply (not emulated on this host)");
             const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
             const u32 mode = insn.words[2] & ~0xffU;
             const u32 depth = mode == 0 ? 8U : 16U;
@@ -1876,6 +1880,17 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 return fail(index, "native matrix load mode");
             u32 address = insn.Bits(24, 8);
             const u64 offset = insn.Bits(40, 24);
+            // EDEN_NX2_LDSM_FENCE=1 (after nxnative 2d6f86f819): the rows other lanes stored
+            // with STS just before are ordered before these loads, and the loads before the
+            // lanes' next stores, by MEMBAR.CTA (Ocarina's movie filter has no BAR between).
+            static const bool ldsm_fence = [] {
+                const char* value = std::getenv("EDEN_NX2_LDSM_FENCE");
+                return value != nullptr && value[0] == '1';
+            }();
+            const auto fence = [&] {
+                if (ldsm_fence) emit(0xef98000000000000ULL | predicate);
+            };
+            fence();
             if (uniform_offset) {
                 const u32 uniform = uniform_register(insn.Bits(32, 8));
                 if (uniform == ~0U) return fail(index, "native matrix load uniform offset");
@@ -1905,6 +1920,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                     emit(0x5c18000000000000ULL | predicate | (dest + matrix) | (u64{252} << 8) |
                          (u64{251} << 20) | (u64{16} << 39));
                 }
+                fence();
                 break;
             }
             emit(0xf0c8000000000000ULL | predicate | 250);                                    // S2R laneid
@@ -1923,6 +1939,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 emit(0xef48000000000000ULL | predicate | (dest + matrix) | (u64{253} << 8) |
                      (offset << 20) | (u64{4} << 48));
             }
+            fence();
             break;
         }
         case 0x919: case 0x9c3: { // S2R / S2UR: special registers the Maxwell S2R handles.
@@ -3268,9 +3285,10 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                      (u64{insn.Bits(60, 2) * 2} << 41));
                 break;
             }
-            // I2F.{U,S}8 Rd, Rs.B0-B3: the byte selector (bits 60-61) as Maxwell's (41-42).
+            // I2F.{U,S}8 Rd, Rs.B0-B3: the byte selector (bits 60-61) as Maxwell's (41-42), for a
+            // uniform source too (Ocarina's sky compute: I2F.F32.U8 R0, UR17.B3).
             if ((insn.words[2] & ~0x400U) != (opcode == 0xd06 ? 0x08001000U : 0x1000U) ||
-                (insn.words[1] & (opcode == 0xd06 ? 0xffffff00U : 0xcfffff00U)) || source == ~0U)
+                (insn.words[1] & 0xcfffff00U) || source == ~0U)
                 return fail(index, "native byte-to-float conversion mode");
             emit(base(0x5cb8000000000000ULL) | (u64{2} << 8) | (is_signed << 13) | (u64{source} << 20) |
                  (u64{insn.Bits(60, 2)} << 41));
@@ -3620,9 +3638,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const bool carry_in = insn.Bits(74, 1) != 0;
                 const u32 carry_out = insn.Bits(81, 3);
                 const u32 a = insn.Bits(24, 8);
-                if ((carry_in && carry_out != 7) || (opcode == 0x210 && (insn.words[1] & ~0xffU)) ||
-                    (rewritten_uniform && carry_out != 7 && carry_out > 1) ||
-                    (rewritten_uniform && carry_in && insn.Bits(87, 3) > 1 && insn.Bits(87, 3) != 7))
+                // Any UPn carry out or in (Ocarina's sky compute: UP2; Kradnah, Lichii #144).
+                if ((carry_in && carry_out != 7) || (opcode == 0x210 && (insn.words[1] & ~0xffU)))
                     return fail(index, "native integer carry mode");
                 if (opcode == 0x810) {
                     emit(0x1c00000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{insn.words[1]} << 20));
@@ -4014,6 +4031,19 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
     u32 high_uniforms = 0;
     for (;;) {
         LoweredProgram lowered = LowerToMaxwellWith(code, high_uniforms, options);
+        // Shadowing a guest register in the mirror range borrows aligned quartets, so it needs
+        // the range to start on a multiple of 4 (216 - high_uniforms). Mirrors are counted in
+        // pairs: retry with two more (Ocarina's Gerudo Valley far cliffs: LDG into R202).
+        if (!lowered && (high_uniforms & 3) &&
+            lowered.error == "native program uses lowering scratch registers") {
+            // Two more mirrors, then the next aligned layouts (a borrowed quartet may collide).
+            for (u32 aligned_count = (high_uniforms + 3) & ~3U;
+                 aligned_count <= ((high_uniforms + 3) & ~3U) + 8 && aligned_count <= 64;
+                 aligned_count += 4) {
+                LoweredProgram aligned = LowerToMaxwellWith(code, aligned_count, options);
+                if (aligned) return aligned;
+            }
+        }
         if (lowered || lowered.high_uniform_registers <= high_uniforms) return lowered;
         high_uniforms = lowered.high_uniform_registers;
     }

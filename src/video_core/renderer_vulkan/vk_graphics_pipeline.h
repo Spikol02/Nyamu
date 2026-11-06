@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -89,6 +90,9 @@ public:
         const std::array<const Shader::Info*, NUM_STAGES>& infos);
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
+    // Image views of the last configured draw (frame dump input capture only).
+    std::vector<VideoCommon::ImageViewId> dump_views;
+
     const std::array<u64, 6>& ShaderHashes() const noexcept {
         return key.unique_hashes;
     }
@@ -169,6 +173,13 @@ public:
         return is_built.load(std::memory_order::relaxed);
     }
 
+    /// Waits up to timeout for the build to finish; true when it is built (from Nemyu 22ef4693d1).
+    [[nodiscard]] bool WaitForBuild(std::chrono::microseconds timeout) {
+        std::unique_lock lock{build_mutex};
+        return build_condvar.wait_for(lock, timeout,
+                                      [this] { return is_built.load(std::memory_order::relaxed); });
+    }
+
     /// EDEN_NX2_FAST_DRAW=2 (nx2_fast_draw.h): whether draws can keep this pipeline's resolved
     /// image views and samplers after light changes. Handles computed at draw time are resolved
     /// on every draw.
@@ -209,6 +220,10 @@ public:
     }
     [[nodiscard]] bool DeltaMismatch() const noexcept {
         return delta_mismatch;
+    }
+
+    [[nodiscard]] bool Failed() const noexcept {
+        return IsBuilt() && !pipeline;
     }
 
     template <typename Spec>
@@ -262,6 +277,7 @@ private:
     std::vector<SampledImage> sampled_images;
     u32 num_textures{};
     bool fragment_has_color0_output{};
+    std::array<bool, 8> fragment_writes_color{};
     bool writes_storage{};
     bool writes_images{};
 

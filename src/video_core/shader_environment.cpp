@@ -258,6 +258,13 @@ size_t GenericEnvironment::ReadSizeBytes() const noexcept {
     return read_highest - read_lowest + INST_SIZE;
 }
 
+const char* GenericEnvironment::DebugWhyNotSerializable() const noexcept {
+    if (has_unbound_instructions) {
+        return "read instructions outside its cached code";
+    }
+    return "has a native trap prefix";
+}
+
 bool GenericEnvironment::CanBeSerialized() const noexcept {
     return !has_unbound_instructions && (!lowered_native || lowered_native->trap_prefix.empty());
 }
@@ -336,6 +343,11 @@ void GenericEnvironment::Serialize(std::ofstream& file) const {
             file.write(reinterpret_cast<const char*>(&gp_passthrough_mask),
                        sizeof(gp_passthrough_mask));
         }
+        if (stage == Shader::Stage::Task || stage == Shader::Stage::Mesh) {
+            file.write(reinterpret_cast<const char*>(&mesh_registers), sizeof(mesh_registers))
+                .write(reinterpret_cast<const char*>(&mesh_primitive_header),
+                       sizeof(mesh_primitive_header));
+        }
     }
 }
 
@@ -372,8 +384,14 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
     return std::nullopt;
 }
 
+// Read once per handle: the type, the format and the integer query of a texture all come from the
+// same descriptor, and a translation asks again for every instruction using it. The first read is
+// also the one Serialize records.
 Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                                              bool via_header_index, u32 raw) {
+    if (const auto it = texture_descriptors.find(raw); it != texture_descriptors.end()) {
+        return it->second;
+    }
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
                                                        gpu_memory->UsesNativeTiling())};
@@ -397,6 +415,7 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                         entry.raw[0], entry.raw[1], entry.raw[2], entry.raw[3]);
         }
     }
+    texture_descriptors.emplace(raw, entry);
     return entry;
 }
 
@@ -450,6 +469,25 @@ private:
     GPUVAddr page_begin{};
     GPUVAddr page_end{};
 };
+
+// The ten programs of Ocarina of Time's upscaler network (16 to 768 HMMA each), keyed by
+// NativeProgramKey of their instructions up to their first HMMA (Nemyu 9e801b7e59): a change to
+// where a capture ends doesn't move that prefix.
+bool IsOcarinaUpscalerNetwork(std::span<const Shader::Ampere::Instruction> native) {
+    static constexpr std::array<u64, 10> keys{
+        0xa299992886770550ULL, 0x9494bc9dacb4f348ULL, 0xccc7db48e3f698a9ULL, 0xbe2243e10bdf1756ULL,
+        0xee06efff6da7695bULL, 0x3161510215a7cf93ULL, 0xddaf9c23e3ab6670ULL, 0xebe72ecc1b836eeaULL,
+        0x06b33e97edf25650ULL, 0x8ba104f62a15f4d4ULL,
+    };
+    const auto hmma = std::ranges::find_if(native, [](const Shader::Ampere::Instruction& instruction) {
+        return instruction.Bits(0, 12) == 0x23c;
+    });
+    if (hmma == native.end()) {
+        return false;
+    }
+    const auto prefix = native.first(static_cast<size_t>(hmma - native.begin()) + 1);
+    return std::ranges::find(keys, Shader::Ampere::NativeProgramKey(prefix)) != keys.end();
+}
 
 } // Anonymous namespace
 
@@ -530,9 +568,16 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
                                    : stage == Shader::Stage::TessellationEval
                                        ? Shader::Ampere::TessellationStage::Evaluation
                                        : Shader::Ampere::TessellationStage::None;
+    // Ocarina of Time stands in for its upscaler network only; its other tensor programs (scene
+    // passes, its 1080p upscaler) have no stand-in, and rejected they left pink and green noise.
+    constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
+    const bool reject_matrix =
+        reject_native_matrix && (Settings::GetCurrentProgramID() != OcarinaOfTimeProgramId ||
+                                 IsOcarinaUpscalerNetwork(native));
     auto lowered = Shader::Ampere::LowerToMaxwell(
         native, {.geometry = geometry_stage,
                  .tensor = true,
+                 .reject_matrix = reject_matrix,
                  .native_code_address = program_base + native_header_size,
                  .verified_traps = verified_traps,
                  .tessellation_stage = tessellation_stage});
@@ -1006,6 +1051,7 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
     if (kepler_compute->IsNativeMode()) {
         initial_offset = sizeof(sph);
         is_proprietary_driver = true;
+        reject_native_matrix = !kepler_compute->EmulatesNativeTensorPrograms();
         InitializeNativeCode(std::move(lowered_native_), 0);
         start_address = sizeof(sph);
     }
@@ -1177,9 +1223,24 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
         if (stage == Shader::Stage::Geometry) {
             file.read(reinterpret_cast<char*>(&gp_passthrough_mask), sizeof(gp_passthrough_mask));
         }
+        if (stage == Shader::Stage::Task || stage == Shader::Stage::Mesh) {
+            file.read(reinterpret_cast<char*>(&mesh_registers), sizeof(mesh_registers))
+                .read(reinterpret_cast<char*>(&mesh_primitive_header),
+                      sizeof(mesh_primitive_header));
+        }
     }
     // Native programs fold bank 1 reads as they did when they were built.
     is_proprietary_driver = texture_bound == 2 || Shader::Ampere::HasNativeAddressMap(code);
+}
+
+size_t FileEnvironment::MemorySize() const {
+    const auto map_bytes = [](const auto& map) {
+        return (map.bucket_count() + 1) *
+               (sizeof(typename std::decay_t<decltype(map)>::value_type) + 2);
+    };
+    return sizeof(*this) + code.capacity() * sizeof(u64) + map_bytes(texture_types) +
+           map_bytes(texture_pixel_formats) + map_bytes(cbuf_values) +
+           map_bytes(storage_pointer_types) + map_bytes(cbuf_replacements);
 }
 
 void FileEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {
@@ -1294,6 +1355,14 @@ void SerializePipeline(std::span<const char> key, std::span<const GenericEnviron
             .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version));
     }
     if (!std::ranges::all_of(envs, &GenericEnvironment::CanBeSerialized)) {
+        if (static std::atomic<u32> logged{}; logged.fetch_add(1) < 32) {
+            for (const GenericEnvironment* const env : envs) {
+                if (!env->CanBeSerialized()) {
+                    LOG_INFO(Render_Vulkan, "Pipeline not stored on disk: a stage {}",
+                             env->DebugWhyNotSerializable());
+                }
+            }
+        }
         return;
     }
     const u32 num_envs{static_cast<u32>(envs.size())};

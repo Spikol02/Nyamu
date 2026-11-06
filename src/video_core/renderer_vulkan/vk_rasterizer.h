@@ -143,6 +143,7 @@ public:
                                const Tegra::Engines::Fermi2D::Config& copy_config) override;
     bool SupportsGameDlssNetwork() const override;
     bool UsesNvidiaDlss() const override;
+    bool EmulatesNativeTensorPrograms() const override;
     bool CanProbeGameDlssOutput() const override {
         return true;
     }
@@ -272,6 +273,11 @@ private:
     FrameDump frame_dump;
 
     vk::Event wfi_event;
+    /// EDEN_NX2_DISPATCH_OVERLAP: where the last dispatch was recorded (command buffer tick and
+    /// render pass serial), and whether a guest wait-for-idle came after it.
+    u64 overlap_dispatch_tick = ~0ULL;
+    u64 overlap_render_pass_serial = ~0ULL;
+    bool overlap_wfi_since_dispatch = true;
 
     boost::container::static_vector<u32, MAX_IMAGE_VIEWS> image_view_indices;
     std::array<VideoCommon::ImageViewId, MAX_IMAGE_VIEWS> image_view_ids;
