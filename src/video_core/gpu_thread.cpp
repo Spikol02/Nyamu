@@ -57,6 +57,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         Common::SetCurrentThreadName("GPU");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
+        Common::PinCurrentThread(Common::PinnedRole::GpuFront);
         VideoCommon::GpuSplit::PinCurrentThread("EDEN_NX2_PIN_FRONT");
         system.RegisterHostThread();
         Tegra::Nx2SemaphoreWaiters::Get().SetWakeEvent(&state.pending_wake);

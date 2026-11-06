@@ -462,6 +462,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     back_running.store(true, std::memory_order_release);
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
+    Common::PinCurrentThread(Common::PinnedRole::GpuBack);
     PinCurrentThread("EDEN_NX2_PIN_BACK");
     system->RegisterHostThread();
 #ifdef _WIN32

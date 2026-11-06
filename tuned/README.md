@@ -178,6 +178,8 @@ Frame generation is off by default again, as before performance build 10. Graphi
 
 The `nx2_switches.txt` beside the program turns the split GPU thread's speed switches back on (`EDEN_NX2_DMA_RANGES`, `EDEN_NX2_LIST_TRUST`, `EDEN_NX2_ACQUIRE_PEEK`, `EDEN_NX2_ACQUIRE_QUEUED=gequal`, `EDEN_NX2_CMD_BATCH`). Since build 9 the file had lost them, and in Ocarina of Time the first GPU thread spent about half of each second waiting for the second. GPU accuracy Accurate turns the split GPU thread off, which costs much more speed than any of these.
 
+On Windows PCs with 6 or more cores, the GPU thread and the split's back each get a physical core of their own (cores 1 and 2), and the emulated CPU cores stay off them (from Frizti/Lichii; Lake Hylia on a Ryzen 7 7800X3D went from 51.3 to 55.6 fps there). `EDEN_NX2_PIN_THREADS=0` turns it off; `EDEN_NX2_PIN_FRONT`/`EDEN_NX2_PIN_BACK` still choose CPUs by hand.
+
 ## License and AI disclosure
 
 GPL-3.0-or-later, the same as the projects it's based on. See `LICENSE.txt`.
