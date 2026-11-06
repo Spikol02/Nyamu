@@ -101,9 +101,12 @@ Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {
         return ctx.OpGroupNonUniformShuffle(ctx.U32[1], SubgroupScope(ctx), value, src_thread_id);
     }
     Id result{ctx.u32_zero_value};
-    // The AMD path is enabled per stage only with an enforced 32-lane subgroup.
-    // Qualcomm retains its full host-subgroup fallback.
-    const u32 loop_lanes = replace_dynamic_shuffle ? 32U : ctx.profile.max_subgroup_size;
+    // The AMD path walks 32 lanes only where the subgroup is enforced to 32. GCN (Polaris, Vega)
+    // runs 64-wide without subgroup size control, and 32 lanes left the upper half of each wave
+    // reading 0. Qualcomm retains its full host-subgroup fallback.
+    const u32 loop_lanes = replace_dynamic_shuffle && !ctx.profile.warp_size_potentially_larger_than_guest
+                               ? 32U
+                               : ctx.profile.max_subgroup_size;
     for (u32 lane = 0; lane < loop_lanes; ++lane) {
         const Id read{
             ctx.OpGroupNonUniformBroadcast(ctx.U32[1], SubgroupScope(ctx), value, ctx.Const(lane))};
