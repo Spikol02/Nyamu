@@ -427,7 +427,9 @@ struct Values {
                                                 true,
                                                 true};
 
-    SwitchableSetting<bool> frame_gen{linkage, false, "frame_gen", Category::Renderer,
+    // On by default in Selevet performance build 10 (FSR 3 frame generation); Graphics >
+    // "Enable Frame Generation" turns it off.
+    SwitchableSetting<bool> frame_gen{linkage, true, "frame_gen", Category::Renderer,
                                       Specialization::Default, true, false};
 
     SwitchableSetting<FrameGenType> frame_gen_type{linkage,

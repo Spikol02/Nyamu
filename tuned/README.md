@@ -166,6 +166,10 @@ Performance build 8 plus fixes and speed-ups for The Legend of Zelda: Ocarina of
 
 Use 1x resolution in Ocarina of Time: the game's upscaling network expects its own image sizes.
 
+## Performance build 10: FSR 3 frame generation on
+
+Performance build 9 with FSR 3 frame generation turned on by default: a generated frame is shown between each pair of real frames, which roughly doubles the frame rate on screen. It adds a little input latency and can smear fast motion or text over moving backgrounds. Graphics > "Enable Frame Generation" turns it off; "Frame Generation Type" stays FSR 3. The FSR 3 fixes from Lichii build-88 (#194: the history and current frames copied before the flow, motion vectors at the flow's resolution with the right sign) are in since build 9.
+
 ## License and AI disclosure
 
 GPL-3.0-or-later, the same as the projects it's based on. See `LICENSE.txt`.
