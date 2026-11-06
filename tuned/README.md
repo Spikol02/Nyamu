@@ -1,4 +1,6 @@
-# Selevet Eglantine
+# Nyamu
+
+Nyamu was called Selevet Eglantine until performance build 10. The program is now `nyamu.exe` and the window title says Nyamu; your settings, keys and saves stay where they were.
 
 An experimental, unofficial Windows build of the Eglantine Nintendo Switch 2 emulator, tuned for Mario Kart World on a Ryzen 5 5500 with an RTX 3050 8 GB and 16 GB of RAM.
 
@@ -6,7 +8,7 @@ It is based on [zortos293/Eglantine build 31](https://github.com/zortos293/Eglan
 
 ## Download
 
-Get the zip from the Releases page, extract it into its own folder, and run `eglantine.exe`. Settings are already built in, so you only need to add your keys and firmware and map your controller.
+Get the zip from the Releases page, extract it into its own folder, and run `nyamu.exe`. Settings are already built in, so you only need to add your keys and firmware and map your controller.
 
 **You need:**
 
@@ -35,7 +37,7 @@ The release is also built with Clang 23.1.4, ThinLTO, an `x86-64-v3` target and 
 
 These are the program's defaults, in `src/common/settings.h`. They apply to all games, and Unsafe accuracy can break some Switch 1 titles, so change them in the emulator's settings or per game if something misbehaves. If you already have an Eden or Eglantine config, any settings you changed yourself stay as they are.
 
-**This build shares its config with other Eden and Eglantine builds.** When it saves your config, settings that match these defaults get marked as "default", so another build you open afterwards will use its own defaults for them instead, which can be much slower. Back up `%APPDATA%\eden\config` first if you switch between builds. Creating an empty `user` folder beside `eglantine.exe` gives this build its own separate data, but you then need to put your keys and firmware there.
+**This build shares its config with other Eden and Eglantine builds.** When it saves your config, settings that match these defaults get marked as "default", so another build you open afterwards will use its own defaults for them instead, which can be much slower. Back up `%APPDATA%\eden\config` first if you switch between builds. Creating an empty `user` folder beside `nyamu.exe` gives this build its own separate data, but you then need to put your keys and firmware there.
 
 | Setting | Value |
 |---|---|
@@ -71,7 +73,7 @@ The sync memory off run was short, so treat it as promising, not final. Heavy tr
 ## Known problems
 
 - The game can log a panic (for example 2162-0001 or 2010-0212) and may keep running in a broken state. The cause isn't fully known.
-- Stopping a game can leave `eglantine.exe` running with no window, holding a lot of RAM. Check Task Manager before relaunching.
+- Stopping a game can leave `nyamu.exe` running with no window, holding a lot of RAM. Check Task Manager before relaunching.
 - Don't share your shader cache: `vulkan.bin` contains game code.
 
 ## Building from source

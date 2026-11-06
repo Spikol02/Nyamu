@@ -172,7 +172,7 @@ std::optional<std::string> MakeRequest(const std::string& url, const std::string
         httplib::Request request{
             .method = "GET",
             .path = path,
-            .headers = {{"Accept", "application/vnd.github+json"}, {"User-Agent", "Lichii"}},
+            .headers = {{"Accept", "application/vnd.github+json"}, {"User-Agent", "Nyamu"}},
         };
 
         client->set_follow_location(true);

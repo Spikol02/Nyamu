@@ -201,7 +201,7 @@ int main(int argc, char* argv[]) {
 
     // Init settings params
     QCoreApplication::setOrganizationName(QStringLiteral("eden"));
-    QCoreApplication::setApplicationName(QStringLiteral("Lichii"));
+    QCoreApplication::setApplicationName(QStringLiteral("Nyamu"));
 
     // Increases the maximum open file limit.
     // TODO: This should be common to all frontends.

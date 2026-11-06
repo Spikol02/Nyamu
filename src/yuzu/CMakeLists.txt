@@ -244,7 +244,7 @@ add_executable(yuzu
     game/carousel.h game/carousel.cpp
 )
 
-set_target_properties(yuzu PROPERTIES OUTPUT_NAME "selevet")
+set_target_properties(yuzu PROPERTIES OUTPUT_NAME "nyamu")
 
 # Threads made without an explicit size (the shader workers among them) get the executable's
 # stack reserve. 1 MiB overflowed in the SSA pass on FAST Fusion's largest shaders; reserving

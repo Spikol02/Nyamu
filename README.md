@@ -1,4 +1,4 @@
-> **Selevet Eglantine:** an unofficial, experimental build tuned for Mario Kart World. See [tuned/README.md](tuned/README.md) for what's different, then the original README below.
+> **Nyamu** (formerly Selevet Eglantine): an unofficial, experimental build tuned for Mario Kart World. See [tuned/README.md](tuned/README.md) for what's different, then the original README below.
 
 <!--
 # SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
