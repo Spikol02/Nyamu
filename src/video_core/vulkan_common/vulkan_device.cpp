@@ -652,7 +652,14 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     // AMD GCN4 and older are told apart by their lack of float16, read before float16 is turned
     // off for newer AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
     // VK_EXT_sampler_filter_minmax (an RDNA3 Radeon 780M logged it).
-    const bool amd_gcn4_or_older = is_amd && !features.shader_float16_int8.shaderFloat16;
+    const u32 device_id = properties.properties.deviceID;
+    // Polaris 10/11/20/21/30 (RX 470-590), Polaris 12 (RX 540/550) and the RX 580 2048SP.
+    const bool is_polaris = properties.properties.vendorID == 0x1002 &&
+                            ((device_id >= 0x67C0 && device_id <= 0x67FF) ||
+                             (device_id >= 0x6980 && device_id <= 0x699F) || device_id == 0x6FDF);
+    const bool amd_gcn4_or_older =
+        is_amd && (is_polaris || !features.shader_float16_int8.shaderFloat16);
+    is_amd_legacy_gcn = is_amd_driver && amd_gcn4_or_older;
     if (is_amd_driver) {
         // AMD drivers need a higher amount of Sets per Pool in certain circumstances like in XC2.
         sets_per_pool = 96;

@@ -497,7 +497,18 @@ void EmitContext::DefineGenericOutput(size_t index, u32 invocations) {
             xfb_varying = &runtime_info.xfb_varyings[xfb_varying_index];
             xfb_varying = xfb_varying->components > 0 ? xfb_varying : nullptr;
         }
-        const u32 num_components{xfb_varying ? xfb_varying->components : remainder};
+        u32 num_components{xfb_varying ? xfb_varying->components : remainder};
+        if (!xfb_varying) {
+            // Stop before the next captured element (see the SPIR-V backend).
+            for (u32 next = element + 1; next < 4; ++next) {
+                const size_t next_index{base_index + next};
+                if (next_index < runtime_info.xfb_count &&
+                    runtime_info.xfb_varyings[next_index].components > 0) {
+                    num_components = next - element;
+                    break;
+                }
+            }
+        }
         if (element > 0) {
             definition += fmt::format(",component={}", element);
         }

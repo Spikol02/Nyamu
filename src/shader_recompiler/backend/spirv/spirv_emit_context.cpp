@@ -169,7 +169,20 @@ void DefineGenericOutput(EmitContext& ctx, size_t index, std::optional<u32> invo
             xfb_varying = &ctx.runtime_info.xfb_varyings[xfb_varying_index];
             xfb_varying = xfb_varying->components > 0 ? xfb_varying : nullptr;
         }
-        const u32 num_components{xfb_varying ? xfb_varying->components : remainder};
+        u32 num_components{xfb_varying ? xfb_varying->components : remainder};
+        if (!xfb_varying) {
+            // Stop before the next captured element, so a varying that starts inside the vector
+            // (Ocarina of Time's unaligned TFB 46 and 89) gets its own variable instead of being
+            // folded into an uncaptured one and never written to the buffer.
+            for (u32 next = element + 1; next < 4; ++next) {
+                const size_t next_index{base_attr_index + next};
+                if (next_index < ctx.runtime_info.xfb_count &&
+                    ctx.runtime_info.xfb_varyings[next_index].components > 0) {
+                    num_components = next - element;
+                    break;
+                }
+            }
+        }
 
         const Id id{DefineOutput(ctx, ctx.F32[num_components], invocations)};
         ctx.Decorate(id, spv::Decoration::Location, static_cast<u32>(index));

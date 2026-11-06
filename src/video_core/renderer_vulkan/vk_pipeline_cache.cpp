@@ -328,9 +328,24 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
     return info;
 }
 
-size_t GetTotalPipelineWorkers() {
+size_t GetTotalPipelineWorkers(const Device& device) {
     const size_t max_core_threads =
         std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL) - 1ULL;
+    // EDEN_NX2_PIPELINE_WORKERS=<n> sets the number of pipeline build threads.
+    if (const char* value = std::getenv("EDEN_NX2_PIPELINE_WORKERS")) {
+        const long requested = std::strtol(value, nullptr, 10);
+        if (requested > 0) {
+            return std::min(max_core_threads, static_cast<size_t>(requested));
+        }
+    }
+    // AMD's legacy Polaris driver uses a lot of RAM per compile of a large Switch 2 shader, and
+    // one build per core is the likely cause of the RX 580 running out of RAM after the intro.
+    if (device.IsAmdLegacyGcn()) {
+        LOG_WARNING(Render_Vulkan,
+                    "AMD GCN4 or older: limiting pipeline build threads to 2 "
+                    "(EDEN_NX2_PIPELINE_WORKERS overrides)");
+        return std::min<size_t>(max_core_threads, 2ULL);
+    }
 #ifdef __ANDROID__
     const int configured = AndroidSettings::values.pipeline_worker_count.GetValue();
     const int clamped = std::clamp(configured, 2, 8);
@@ -461,7 +476,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
           return value != nullptr && std::string_view{value} == "1";
       }()},
       num_pipeline_workers{device.HasBrokenParallelShaderCompiling() ? 1ULL
-                                                                     : GetTotalPipelineWorkers()},
+                                                                     : GetTotalPipelineWorkers(device)},
       workers(num_pipeline_workers, "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {},
                            Common::ThreadPlacement::Background),
