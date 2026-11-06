@@ -140,6 +140,7 @@ void GpuSplit::Stop() {
     last_writer_position = 0;
     pending_write_count = 0;
     async_writes.clear();
+    report_pages.clear();
     last_sync_position = 0;
     last_release_position = 0;
     sem_writes.fill({});
