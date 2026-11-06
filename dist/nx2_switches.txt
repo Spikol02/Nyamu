@@ -7,11 +7,10 @@
 #
 # Restart the emulator after editing.
 
-<<<<<<< HEAD
 # --- Performance tuning defaults for Switch 2 ---
 # Offload GPU method/macro execution to the back thread (SPLIT=2 delivers up to +54% FPS alone).
 EDEN_NX2_SPLIT=2
-=======
+
 #EDEN_NX2_3D_HISTORY=
 #EDEN_NX2_3D_METHODS=
 #EDEN_NX2_A2C_REFRESH=
@@ -262,7 +261,6 @@ EDEN_NX2_SPLIT=2
 #EDEN_NX2_VSYNC_HZ=
 #EDEN_NX2_WINDOW_TRACE=
 #EDEN_NX2_WINDOW_TRACE_SKIP=
->>>>>>> fad0fa4f85 (shader: avoid dynamic subgroup shuffles in AMD graphics shaders)
 
 # Batch GPU fence syncpoints to reduce host driver overhead and smooth frametimes.
 EDEN_NX2_FENCE_BATCH=1
