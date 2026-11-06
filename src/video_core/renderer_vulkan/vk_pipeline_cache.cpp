@@ -1171,6 +1171,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t skipped_pipelines = 0;
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
+    size_t migrated_pipelines = 0;
+    size_t feature_mismatched_pipelines = 0;
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -1237,6 +1239,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 dynamic_features.has_color_write_enable ||
             (key.state.dynamic_vertex_input != 0) !=
                 dynamic_features.has_dynamic_vertex_input) {
+            ++feature_mismatched_pipelines;
             return;
         }
 
@@ -1251,13 +1254,25 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
 
+        // The key holds the driver version, so after a driver update no cached pipeline matched
+        // a draw again: each was built at boot for nothing, then built again in game and stored
+        // a second time. The cache holds guest shaders that are translated again for this driver
+        // either way, so an entry from another version of the same driver is taken as this one.
+        const u64 recorded_hash = key.Hash();
+        if (key.state.driver_id == dynamic_features.driver_id &&
+            key.state.driver_version != dynamic_features.driver_version &&
+            std::getenv("EDEN_NX2_KEEP_CACHE_DRIVER_VERSION") == nullptr) {
+            key.state.driver_version = dynamic_features.driver_version;
+            ++migrated_pipelines;
+        }
         const u64 hash = key.Hash();
         if (!disk_pipelines.insert(hash).second) {
             return;
         }
         if (!PreloadAllPipelines() &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
-                                    : !used_pipelines.contains(hash))) {
+                                    : !used_pipelines.contains(hash) &&
+                                          !used_pipelines.contains(recorded_hash))) {
             ++skipped_pipelines;
             size_t capture_bytes = (envs.capacity() - envs.size()) * sizeof(FileEnvironment);
             for (const auto& env : envs) {
@@ -1312,6 +1327,19 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                                load_graphics);
 
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
+    if (feature_mismatched_pipelines != 0) {
+        LOG_WARNING(Render_Vulkan,
+                    "{} cached graphics pipelines were saved with other dynamic state features "
+                    "(another GPU or the extended/vertex input dynamic state settings) and are "
+                    "not loaded",
+                    feature_mismatched_pipelines);
+    }
+    if (migrated_pipelines != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "{} cached graphics pipelines were saved by another version of this driver and "
+                 "are used for this one",
+                 migrated_pipelines);
+    }
     LOG_INFO(Render_Vulkan, "Float atomic add: {} (device {} it natively)",
              profile.support_float32_atomic_add ? "native" : "CAS loop",
              device.IsShaderBufferFloat32AtomicAddSupported() ? "supports" : "does not support");
