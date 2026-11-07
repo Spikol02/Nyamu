@@ -537,10 +537,20 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
         .max_user_clip_distances = device.GetMaxUserClipDistances()
     };
-    profile.support_cooperative_hmma =
-        device.IsCooperativeHmmaSupported() && TestCooperativeHmma(device);
-    profile.support_cooperative_hmma_16x16x16 =
-        !profile.support_cooperative_hmma && device.IsCooperativeHmma16x16x16Supported();
+    // Guest tensor operations stay on the emulated path unless EDEN_NX2_COOPERATIVE_HMMA=1: in
+    // Ocarina of Time on an RX 9070 XT the cooperative path saved GPU time but no frame rate.
+    const char* const cooperative_env = std::getenv("EDEN_NX2_COOPERATIVE_HMMA");
+    const bool cooperative_allowed = cooperative_env && cooperative_env[0] == '1';
+    profile.support_cooperative_hmma = cooperative_allowed &&
+                                       device.IsCooperativeHmmaSupported() &&
+                                       TestCooperativeHmma(device);
+    profile.support_cooperative_hmma_16x16x16 = cooperative_allowed &&
+                                                !profile.support_cooperative_hmma &&
+                                                device.IsCooperativeHmma16x16x16Supported();
+    if (!cooperative_allowed) {
+        LOG_INFO(Render_Vulkan, "Guest tensor operations run on the emulated path "
+                                "(EDEN_NX2_COOPERATIVE_HMMA=1 runs them on cooperative matrices)");
+    }
     if (profile.support_cooperative_hmma_16x16x16) {
         LOG_INFO(Render_Vulkan, "Guest tensor operations run on 16x16x16 cooperative matrices");
     }
