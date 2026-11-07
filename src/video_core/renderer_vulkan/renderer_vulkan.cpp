@@ -21,6 +21,7 @@
 #include "core/core_timing.h"
 #include "core/frontend/graphics_context.h"
 #include "video_core/capture.h"
+#include "video_core/frametime_log.h"
 #include "video_core/gpu.h"
 #include "video_core/present.h"
 #include "video_core/render_trace.h"
@@ -259,6 +260,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     const auto presenting = trace ? std::chrono::steady_clock::now()
                                   : std::chrono::steady_clock::time_point{};
     present_manager.Present(frame);
+    VideoCore::FrametimeLog::OnPresent();
     const auto presented = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
 #ifdef HAS_LSFG
