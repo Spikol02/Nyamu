@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -17,6 +19,31 @@
 /// them at the end of each presented frame, so every cache they touch is used from its owner.
 /// Without the server nothing is posted and the per-frame cost is one relaxed atomic load.
 namespace VideoCore::Nx2Debug {
+
+/// Numbered experiment switches EDEN_NX2_EXP0 .. EDEN_NX2_EXP63 (from Fritchii): slots for fixes
+/// that can be A/B-tested by their number. 0 = off. Kept experiments are on by default in
+/// LoadExperiments; their variable set to 0 turns them off.
+inline constexpr int ExperimentCount = 64;
+inline std::atomic<int> g_experiments[ExperimentCount]{};
+
+inline void LoadExperiments() {
+    static const bool loaded = [] {
+        for (int n = 0; n < ExperimentCount; ++n) {
+            const std::string name = "EDEN_NX2_EXP" + std::to_string(n);
+            if (const char* value = std::getenv(name.c_str())) {
+                g_experiments[n].store(std::atoi(value), std::memory_order_relaxed);
+            }
+        }
+        return true;
+    }();
+    static_cast<void>(loaded);
+}
+
+/// The value of experiment switch `n` (EDEN_NX2_EXP<n>), 0 unless set.
+[[nodiscard]] inline int Experiment(int n) {
+    LoadExperiments();
+    return g_experiments[n].load(std::memory_order_relaxed);
+}
 
 struct CaptureRequest {
     u64 id;
