@@ -47,8 +47,6 @@ struct Profile {
     bool support_typeless_image_loads{};
     bool support_demote_to_helper_invocation{};
     bool support_int64_atomics{};
-    /// Storage buffer float atomic add as one instruction (OpAtomicFAddEXT) instead of a CAS loop.
-    bool support_float32_atomic_add{};
     bool support_shared_int64_atomics{};
     bool support_derivative_control{};
     bool support_geometry_shader_passthrough{};
@@ -83,9 +81,6 @@ struct Profile {
 
     /// OpFClamp is broken and OpFMax + OpFMin should be used instead
     bool has_broken_spirv_clamp{};
-    /// OpFMin, OpFMax and OpFClamp return NaN for a NaN operand, where Maxwell returns the other
-    /// operand (and saturates NaN to 0); OpNMin and OpNMax are needed
-    bool has_nan_propagating_fminmax{};
     /// The Position builtin needs to be wrapped in a struct when used as an input
     bool has_broken_spirv_position_input{};
     /// Offset image operands with an unsigned type do not work
@@ -109,9 +104,6 @@ struct Profile {
     /// Some drivers have broken support for OpVectorExtractDynamic on subgroup mask inputs
     bool has_broken_spirv_subgroup_mask_vector_extract_dynamic{};
     bool has_broken_spirv_subgroup_shuffle{};
-    /// OpGroupNonUniformShuffle with a lane computed at run time crashes the pipeline compiler in
-    /// graphics stages; compute, task and mesh stages keep it
-    bool has_broken_spirv_dynamic_subgroup_shuffle{};
     u32 max_subgroup_size{};
 
     u32 gl_max_compute_smem_size{};

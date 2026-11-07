@@ -474,14 +474,6 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     // Get suitability and device properties.
     const bool is_suitable = GetSuitability(surface != VkSurfaceKHR{});
 
-    // EDEN_NX2_DRIVER_AMD=1: take the AMD proprietary driver's workarounds on another card, so a
-    // fault seen on AMD can be looked for there (EDEN_NX2_NO_NV_GEOMETRY=1 adds AMD's shader
-    // paths on NVIDIA).
-    if (std::getenv("EDEN_NX2_DRIVER_AMD") != nullptr) {
-        LOG_WARNING(Render_Vulkan, "EDEN_NX2_DRIVER_AMD: taking the AMD proprietary driver's paths");
-        properties.driver.driverID = VK_DRIVER_ID_AMD_PROPRIETARY;
-    }
-
     const VkDriverId driver_id = properties.driver.driverID;
 
     const bool is_radv = driver_id == VK_DRIVER_ID_MESA_RADV;
@@ -489,22 +481,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE;
     const bool is_amd = is_amd_driver || is_radv;
 
-    // AMD's proprietary Windows driver can crash compiling some pipelines concurrently (Donkey
-    // Kong Bananza on RDNA1/2, upstream issue #511; PokeDinner 57ffa55a8c serializes them too).
-    // The crashes were reported in Switch 2 titles; Switch 1 titles keep the faster parallel boot.
-    // EDEN_NX2_AMD_PARALLEL_PIPELINES=1 keeps the parallel workers.
-#ifdef _WIN32
-    if (driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && Settings::CurrentProgramIsSwitch2()) {
-        const char* parallel = std::getenv("EDEN_NX2_AMD_PARALLEL_PIPELINES");
-        has_broken_parallel_compiling = parallel == nullptr || parallel[0] != '1';
-        if (has_broken_parallel_compiling) {
-            LOG_WARNING(Render_Vulkan, "AMD proprietary driver: serializing pipeline compilation");
-        }
-    }
-#endif
-
     const bool is_intel_windows = driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
-    const bool is_intel_anv = driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
 
     const bool is_nvidia = driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
     const bool is_mvk = driver_id == VK_DRIVER_ID_MOLTENVK;
@@ -555,7 +532,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         IsFormatSupported(VK_FORMAT_D24_UNORM_S8_UINT,
                           VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, FormatType::Optimal);
 
-    supports_conditional_barriers = !(is_intel_anv || is_intel_windows);
+    supports_conditional_barriers = !is_intel_windows;
 
     CollectPhysicalMemoryInfo();
     CollectToolingInfo();
@@ -1341,6 +1318,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT;
         SetNext(next, properties.descriptor_buffer);
     }
+    if (extensions.graphics_pipeline_library) {
+        properties.graphics_pipeline_library.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
+        SetNext(next, properties.graphics_pipeline_library);
+    }
     if (extensions.subgroup_size_control || features.subgroup_size_control.subgroupSizeControl) {
         properties.subgroup_size_control.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
@@ -1475,6 +1457,28 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.depth_clip_control, features.depth_clip_control,
                                        VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
 
+    // VK_EXT_graphics_pipeline_library: on by default with AMD's own driver (the only one it was
+    // tested on), EDEN_NX2_GPL=1 turns it on elsewhere and EDEN_NX2_GPL=0 turns it off.
+    {
+        const char* gpl_env = std::getenv("EDEN_NX2_GPL");
+        const bool wanted = gpl_env != nullptr && gpl_env[0] != '\0'
+                                ? gpl_env[0] == '1'
+                                : properties.driver.driverID == VK_DRIVER_ID_AMD_PROPRIETARY;
+        extensions.graphics_pipeline_library =
+            wanted && extensions.pipeline_library &&
+            features.graphics_pipeline_library.graphicsPipelineLibrary;
+        RemoveExtensionFeatureIfUnsuitable(extensions.graphics_pipeline_library,
+                                           features.graphics_pipeline_library,
+                                           VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        LOG_INFO(Render_Vulkan, "Graphics pipeline libraries: wanted={} supported={} enabled={}",
+                 wanted, features.graphics_pipeline_library.graphicsPipelineLibrary != 0,
+                 extensions.graphics_pipeline_library);
+        if (!extensions.graphics_pipeline_library && extensions.pipeline_library) {
+            RemoveExtensionIfUnsuitable(false, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+            extensions.pipeline_library = false;
+        }
+    }
+
     // VK_EXT_descriptor_buffer
     extensions.descriptor_buffer = features.descriptor_buffer.descriptorBuffer;
     RemoveExtensionFeatureIfUnsuitable(extensions.descriptor_buffer, features.descriptor_buffer,
@@ -1608,8 +1612,7 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
 
     // VK_KHR_pipeline_executable_properties
-    if (Settings::values.renderer_shader_feedback.GetValue() ||
-        (std::getenv("EDEN_NX2_PIPELINE_STATS") != nullptr)) {
+    if (Settings::values.renderer_shader_feedback.GetValue()) {
         extensions.pipeline_executable_properties =
             features.pipeline_executable_properties.pipelineExecutableInfo;
         RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_executable_properties,

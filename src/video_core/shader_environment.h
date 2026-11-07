@@ -23,7 +23,6 @@
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ampere/instruction.h"
 #include "video_core/engines/maxwell_3d.h"
-#include "video_core/textures/texture.h"
 
 namespace Tegra {
 class Memorymanager;
@@ -91,13 +90,7 @@ public:
         return lowered_native;
     }
 
-    /// The program's GPU address (the shader dump names native programs by it).
-    [[nodiscard]] GPUVAddr ProgramBase() const noexcept {
-        return program_base;
-    }
-
     [[nodiscard]] bool CanBeSerialized() const noexcept;
-    [[nodiscard]] const char* DebugWhyNotSerializable() const noexcept;
 
     [[nodiscard]] u64 CalculateHash() const;
 
@@ -120,8 +113,6 @@ protected:
     std::shared_ptr<const LoweredNativeCode> LowerNativeCode(u32 source_header_size,
                                                           bool geometry_stage);
     size_t native_source_size{};
-    /// Reject matrix multiplies (KeplerCompute::EmulatesNativeTensorPrograms).
-    bool reject_native_matrix{};
     std::shared_ptr<const LoweredNativeCode> lowered_native;
 
     Tegra::Texture::TICEntry ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
@@ -133,7 +124,6 @@ protected:
     std::vector<u64> code;
     ::Common::unordered_map<u32, Shader::TextureType> texture_types;
     ::Common::unordered_map<u32, Shader::TexturePixelFormat> texture_pixel_formats;
-    ::Common::unordered_map<u32, Tegra::Texture::TICEntry> texture_descriptors;
     ::Common::unordered_map<u64, u32> cbuf_values;
     ::Common::unordered_map<u64, u8> storage_pointer_types; ///< IsCbufStorageBufferPointer answers
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
@@ -179,46 +169,9 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
-    using TexturePool = std::vector<Tegra::Texture::TICEntry>;
-
-    /// Copies the 3D engine's texture pool for Detach, shared by a pipeline's environments. Null
-    /// when it is too large to copy or not mapped.
-    [[nodiscard]] static std::shared_ptr<const TexturePool> CopyTexturePool(
-        Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager& gpu_memory);
-
-    /// Copies what translation reads of the 3D engine's live state (this stage's constant buffers,
-    /// the texture pool, the viewport flag, the HLE replacements), so a translation worker can use
-    /// the environment while the GPU thread moves on. Only for native programs, whose code was
-    /// lowered up front: their instructions are not read from guest memory.
-    [[nodiscard]] bool Detach(std::shared_ptr<const TexturePool> texture_pool);
-
-    /// Detached without a copied texture pool (too large to copy), translation reads descriptors
-    /// from the live pool: whether the texture types and formats it read are still what the 3D
-    /// engine's pool gives, so the translation fits the current draw.
-    [[nodiscard]] bool TexturesMatch(Tegra::Engines::Maxwell3D& maxwell3d_);
-
 private:
-    struct EngineSnapshot {
-        struct ConstBuffer {
-            bool enabled{};
-            u32 size{};
-            std::vector<u8> bytes;
-        };
-        std::array<ConstBuffer, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers> const_buffers;
-        std::shared_ptr<const TexturePool> texture_pool; ///< Null: read from tic_address
-        GPUVAddr tic_address{};
-        u32 tic_limit{};
-        bool via_header_index{};
-        u32 viewport_scale_offset_enabled{};
-        ::Common::unordered_map<u64, Tegra::Engines::Maxwell3D::HLEReplacementAttributeType>
-            replace_table;
-    };
-
-    Tegra::Texture::TICEntry TextureEntry(u32 handle);
-
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
-    std::shared_ptr<const EngineSnapshot> snapshot; ///< Set once detached
 };
 
 class ComputeEnvironment final : public GenericEnvironment {
@@ -266,8 +219,6 @@ public:
     FileEnvironment(const FileEnvironment&) = delete;
 
     void Deserialize(std::ifstream& file);
-
-    [[nodiscard]] size_t MemorySize() const;
 
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 

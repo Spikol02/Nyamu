@@ -57,7 +57,6 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         Common::SetCurrentThreadName("GPU");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
-        VideoCommon::GpuSplit::PinCurrentThread("EDEN_NX2_PIN_FRONT");
         system.RegisterHostThread();
         Tegra::Nx2SemaphoreWaiters::Get().SetWakeEvent(&state.pending_wake);
         SCOPE_EXIT {
@@ -153,11 +152,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     Profile::Scope scope{Profile::Zone::Push};
                     scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
-                    // TickWork ends fast draw reuse itself when it runs a request.
                     split.Defer([gpu = &system.GPU()] {
                         Profile::Scope scope{Profile::Zone::Tick};
                         gpu->TickWork();
-                    }, VideoCommon::GpuSplit::FastDrawNeutral);
+                    });
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                     auto wrapped = [fn = std::move(run->func)]() mutable {
                         Profile::Scope scope{Profile::Zone::Run};
@@ -169,7 +167,6 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                         split.Drain(VideoCommon::DrainSite::Map);
                     } else {
                         split.DeferFunction(std::move(wrapped));
-                        split.NoteMemoryWrite();
                     }
                 } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                     split.Defer([rasterizer_ptr, addr = flush->addr, size = flush->size] {
@@ -186,7 +183,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 }
                 split.Defer([state_ptr = &state, fence = next.fence, block = next.block] {
                     SignalCommand(*state_ptr, fence, block);
-                }, VideoCommon::GpuSplit::FastDrawNeutral);
+                });
                 split.Publish();
                 last_progress = std::chrono::steady_clock::now();
                 continue;

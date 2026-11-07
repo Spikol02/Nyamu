@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <chrono>
 #include <deque>
 #include <map>
 #include <optional>
@@ -19,8 +18,6 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
-#include "common/logging.h"
-#include "common/scope_exit.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/basic_block.h"
 #include "shader_recompiler/frontend/ir/breadth_first_search.h"
@@ -68,7 +65,6 @@ struct StorageInfo {
     StorageBufferSet set;
     StorageInstVector to_replace;
     StorageWritesSet writes;
-    StorageWritesSet rebased_writes;
     /// Constant buffer words that step strided iterators, see CollectIteratorWords
     StorageBufferSet iterator_words;
     /// Constant buffer pointers a global atomic uses as its address, see CollectAtomicPointers
@@ -121,6 +117,7 @@ bool IsGlobalMemory(const IR::Inst& inst) {
     case IR::Opcode::GlobalAtomicOr32:
     case IR::Opcode::GlobalAtomicXor32:
     case IR::Opcode::GlobalAtomicExchange32:
+    case IR::Opcode::GlobalAtomicCompareExchange32:
     case IR::Opcode::GlobalAtomicIAdd64:
     case IR::Opcode::GlobalAtomicSMin64:
     case IR::Opcode::GlobalAtomicUMin64:
@@ -173,6 +170,7 @@ bool IsGlobalMemoryWrite(const IR::Inst& inst) {
     case IR::Opcode::GlobalAtomicOr32:
     case IR::Opcode::GlobalAtomicXor32:
     case IR::Opcode::GlobalAtomicExchange32:
+    case IR::Opcode::GlobalAtomicCompareExchange32:
     case IR::Opcode::GlobalAtomicIAdd64:
     case IR::Opcode::GlobalAtomicSMin64:
     case IR::Opcode::GlobalAtomicUMin64:
@@ -257,6 +255,8 @@ IR::Opcode GlobalToStorage(IR::Opcode opcode) {
         return IR::Opcode::StorageAtomicXor32;
     case IR::Opcode::GlobalAtomicExchange32:
         return IR::Opcode::StorageAtomicExchange32;
+    case IR::Opcode::GlobalAtomicCompareExchange32:
+        return IR::Opcode::StorageAtomicCompareExchange32;
     case IR::Opcode::GlobalAtomicIAdd64:
         return IR::Opcode::StorageAtomicIAdd64;
     case IR::Opcode::GlobalAtomicSMin64:
@@ -472,15 +472,7 @@ struct TrackingConditions {
         IR::Block* merge;
     };
     std::unordered_map<const IR::Inst*, IR::Block*> owners;
-    // The If scopes enclosing each block, as a tree: each block keeps the index of its innermost
-    // scope and each scope its parent's. Copying the whole stack for every block took up to
-    // 200 ms on Kirby Air Riders' 3000-block compute programs.
-    struct ScopeNode {
-        Scope scope;
-        s32 parent;
-    };
-    std::vector<ScopeNode> scope_nodes;
-    std::unordered_map<IR::Block*, s32> scopes;
+    std::unordered_map<IR::Block*, std::vector<Scope>> scopes;
     std::unordered_map<IR::Block*, std::vector<Scope>> merges;
     std::unordered_map<IR::Block*, IR::Block*> loops;
     IR::Block* current{};
@@ -495,7 +487,7 @@ struct TrackingConditions {
                 }
             }
         }
-        s32 active = -1; // Innermost enclosing scope, an index into scope_nodes
+        std::vector<Scope> active;
         std::vector<IR::Block*> loop_stack;
         IR::Block* previous{};
         for (const auto& node : program.syntax_list) {
@@ -510,12 +502,11 @@ struct TrackingConditions {
                 const Scope scope{Literal(node.data.if_node.cond), previous,
                                   node.data.if_node.merge};
                 merges[scope.merge].push_back(scope);
-                scope_nodes.push_back({scope, active});
-                active = static_cast<s32>(scope_nodes.size() - 1);
+                active.push_back(scope);
                 break;
             }
             case IR::AbstractSyntaxNode::Type::EndIf:
-                active = scope_nodes[active].parent;
+                active.pop_back();
                 break;
             case IR::AbstractSyntaxNode::Type::Loop:
                 loop_stack.push_back(node.data.loop.body);
@@ -719,8 +710,8 @@ struct TrackingConditions {
         }
         for (const auto& branch : merge->second) {
             const auto [condition, positive] = branch.condition;
-            for (s32 node = current_scopes->second; node >= 0; node = scope_nodes[node].parent) {
-                const auto [known_condition, known_positive] = scope_nodes[node].scope.condition;
+            for (const auto& known : current_scopes->second) {
+                const auto [known_condition, known_positive] = known.condition;
                 if (condition != known_condition) {
                     continue;
                 }
@@ -1133,7 +1124,7 @@ small_vector<StorageBufferAddr, 4> NativePointerCandidates(const IR::U32& low_ad
                         const StorageBufferAddr pointer{.index = index.U32(),
                                                         .offset = first + slot * stride};
                         if (Common::IsAligned(pointer.offset, 8) &&
-                            std::ranges::find_if(candidates, [&](const StorageBufferAddr& entry) { return entry == pointer; }) == candidates.end() &&
+                            std::ranges::find_if(candidates, [&](const StorageBufferAddr& e) { return e == pointer; }) == candidates.end() &&
                             env.IsCbufStorageBufferPointer(pointer.index, pointer.offset)) {
                             candidates.push_back(pointer);
                             dynamic = true;
@@ -1147,7 +1138,7 @@ small_vector<StorageBufferAddr, 4> NativePointerCandidates(const IR::U32& low_ad
             }
             const StorageBufferAddr pointer{.index = index.U32(), .offset = offset.U32()};
             if (Common::IsAligned(pointer.offset, 8) &&
-                std::ranges::find_if(candidates, [&](const StorageBufferAddr& entry) { return entry == pointer; }) == candidates.end() &&
+                std::ranges::find_if(candidates, [&](const StorageBufferAddr& e) { return e == pointer; }) == candidates.end() &&
                 env.IsCbufStorageBufferPointer(pointer.index, pointer.offset)) {
                 candidates.push_back(pointer);
             }
@@ -1210,7 +1201,7 @@ small_vector<StorageBufferAddr, 4> NativePointerCandidates(const IR::U32& low_ad
             // table per object type: every slot whose table entry is a pointer). Those are table
             // candidates, bound only in the bindings the other storage buffers leave free.
             const auto add = [&](const StorageBufferAddr& pointer, bool table) {
-                if (std::ranges::find_if(candidates, [&](const StorageBufferAddr& entry) { return entry == pointer; }) != candidates.end()) {
+                if (std::ranges::find_if(candidates, [&](const StorageBufferAddr& e) { return e == pointer; }) != candidates.end()) {
                     return;
                 }
                 if (table && env.ShaderStage() != Stage::Compute) {
@@ -1223,7 +1214,7 @@ small_vector<StorageBufferAddr, 4> NativePointerCandidates(const IR::U32& low_ad
                     if (!info.tables_enabled) {
                         return;
                     }
-                    if (std::ranges::find_if(info.table_candidates, [&](const StorageBufferAddr& entry) { return entry == pointer; }) ==
+                    if (std::ranges::find_if(info.table_candidates, [&](const StorageBufferAddr& e) { return e == pointer; }) ==
                         info.table_candidates.end()) {
                         info.table_candidates.push_back(pointer);
                     }
@@ -1345,7 +1336,7 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
             // run time. Rebasing on one of them drops the other path's accesses.
             bool accepted{};
             for (const StorageBufferAddr& candidate : candidates) {
-                if (std::ranges::find_if(info.table_candidates, [&](const StorageBufferAddr& entry) { return entry == candidate; }) !=
+                if (std::ranges::find_if(info.table_candidates, [&](const StorageBufferAddr& e) { return e == candidate; }) !=
                     info.table_candidates.end()) {
                     const StorageBufferAddr holder{.index = candidate.index,
                                                    .offset = candidate.offset};
@@ -1427,7 +1418,6 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
     // Collect storage buffer and the instruction
     if (IsGlobalMemoryWrite(inst)) {
         info.writes.insert(*storage_buffer);
-        info.rebased_writes.insert(*storage_buffer);
     }
     info.set.insert(*storage_buffer);
     info.to_replace.push_back(StorageInst{
@@ -1484,6 +1474,16 @@ void ReplaceAtomic(IR::Block& block, IR::Inst& inst, const IR::U32& storage_inde
     const auto it{IR::Block::InstructionList::s_iterator_to(inst)};
     const IR::Value value{
         &*block.PrependNewInst(it, new_opcode, {storage_index, offset, inst.Arg(1)})};
+    inst.ReplaceUsesWith(value);
+}
+
+/// Replace a global compare-exchange with its storage buffer equivalent, keeping both operands
+void ReplaceAtomicCompareExchange(IR::Block& block, IR::Inst& inst, const IR::U32& storage_index,
+                                  const IR::U32& offset) {
+    const IR::Opcode new_opcode{GlobalToStorage(inst.GetOpcode())};
+    const auto it{IR::Block::InstructionList::s_iterator_to(inst)};
+    const IR::Value value{&*block.PrependNewInst(
+        it, new_opcode, {storage_index, offset, inst.Arg(1), inst.Arg(2)})};
     inst.ReplaceUsesWith(value);
 }
 
@@ -1544,6 +1544,8 @@ void Replace(IR::Block& block, IR::Inst& inst, const IR::U32& storage_index,
     case IR::Opcode::GlobalAtomicMaxF16x2:
     case IR::Opcode::GlobalAtomicMaxF32x2:
         return ReplaceAtomic(block, inst, storage_index, offset);
+    case IR::Opcode::GlobalAtomicCompareExchange32:
+        return ReplaceAtomicCompareExchange(block, inst, storage_index, offset);
     default:
         throw InvalidArgument("Invalid global memory opcode {}", inst.GetOpcode());
     }
@@ -1559,29 +1561,16 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     if (!has_global_memory) {
         return;
     }
-    // Where a slow run of this pass spends its time (logged when it takes over 50 ms).
-    auto part_begin = std::chrono::steady_clock::now();
-    std::array<double, 5> part_ms{};
-    const auto end_part = [&](size_t part) {
-        const auto now = std::chrono::steady_clock::now();
-        part_ms[part] = std::chrono::duration<double, std::milli>(now - part_begin).count();
-        part_begin = now;
-    };
     TrackingConditions conditions{program};
-    end_part(0);
     StorageInfo info;
     info.iterator_words = CollectIteratorWords(program);
-    end_part(1);
     info.atomic_pointers = CollectAtomicPointers(program);
-    end_part(2);
-    size_t accesses = 0;
     const auto collect = [&] {
         for (IR::Block* const block : program.post_order_blocks) {
             for (IR::Inst& inst : block->Instructions()) {
                 if (!IsGlobalMemory(inst)) {
                     continue;
                 }
-                ++accesses;
                 conditions.current = block;
                 CollectStorageBuffers(*block, inst, info, env, conditions);
             }
@@ -1598,16 +1587,6 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         info = std::move(with_tables);
         collect();
     }
-    end_part(3);
-    SCOPE_EXIT {
-        end_part(4);
-        if (part_ms[0] + part_ms[1] + part_ms[2] + part_ms[3] + part_ms[4] > 50.0) {
-            LOG_INFO(Shader,
-                     "Slow storage buffer pass: conditions {:.1f}, iterator words {:.1f}, atomic "
-                     "pointers {:.1f}, accesses {:.1f} ({} of them), replace {:.1f} ms",
-                     part_ms[0], part_ms[1], part_ms[2], part_ms[3], accesses, part_ms[4]);
-        }
-    };
     program.info.native_global_bounds |= info.native_runtime_bounds;
     for (const StorageBufferAddr& storage_buffer : info.set) {
         program.info.storage_buffers_descriptors.push_back({
@@ -1616,7 +1595,6 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
             .count = 1,
             .is_written = info.writes.contains(storage_buffer),
             .indirect_offset = storage_buffer.indirect,
-            .rebased_writes = info.rebased_writes.contains(storage_buffer),
         });
     }
     for (const StorageInst& storage_inst : info.to_replace) {
@@ -1643,7 +1621,6 @@ void JoinStorageInfo(Info& base, Info& source) {
         })};
         if (it != descriptors.end()) {
             it->is_written |= desc.is_written;
-            it->rebased_writes |= desc.rebased_writes;
             continue;
         }
         descriptors.push_back(desc);

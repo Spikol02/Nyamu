@@ -28,15 +28,7 @@ DECLARE_ENUM_FLAG_OPERATORS(MemoryPermission)
  */
 class HostMemory {
 public:
-    /// Committed: all backing memory is committed up front. Deferred (Windows): it is only
-    /// reserved, and MarkUsed commits each granule before its first use.
-    enum class BackingMode {
-        Committed,
-        Deferred,
-    };
-
-    explicit HostMemory(size_t backing_size_, size_t virtual_size_,
-                        BackingMode backing_mode = BackingMode::Committed);
+    explicit HostMemory(size_t backing_size_, size_t virtual_size_);
     ~HostMemory();
 
     /**

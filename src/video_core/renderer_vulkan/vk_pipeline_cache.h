@@ -12,10 +12,10 @@
 #include <cstddef>
 #include <deque>
 #include <filesystem>
-#include <future>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <type_traits>
 #include "common/container/unordered_map.h"
@@ -35,7 +35,6 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
-#include "video_core/renderer_vulkan/vk_pipeline_cache_prebuild.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/shader_cache.h"
 
@@ -138,63 +137,9 @@ public:
 private:
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
-    /// EDEN_NX2_PIPELINE_CLEAN: CurrentGraphicsPipeline without FixedPipelineState::Refresh nor
-    /// the key comparison while nothing Refresh reads changed since the last lookup.
-    [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineClean();
-    /// The registers Refresh reads with these features, as (first word, words) ranges.
-    void BuildCleanWatch();
-    [[nodiscard]] bool CleanInputsUnchanged() const;
-    void TakeCleanSnapshot();
-
-    struct CleanLookup {
-        struct Range {
-            u32 first;
-            u32 count;
-        };
-        bool built{};
-        std::vector<Range> ranges;     ///< Read by every Refresh
-        std::vector<Range> xfb_ranges; ///< Read while transform feedback is enabled
-        std::vector<u32> snapshot;     ///< ranges' words at the last Refresh
-        std::vector<u32> xfb_snapshot;
-        std::array<u64, 6> hashes{};   ///< graphics_key.unique_hashes at the last Refresh
-        const Tegra::Engines::Maxwell3D* maxwell3d{};
-        Maxwell::PrimitiveTopology topology{};
-        Tegra::Engines::Maxwell3D::EngineHint engine_state{};
-        /// current_pipeline when its key was graphics_key after the last Refresh, else null.
-        GraphicsPipeline* pipeline{};
-        u64 hits{};
-        u64 misses{};
-        std::chrono::steady_clock::time_point last_log{};
-    } clean;
-
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
-
-    /// A graphics pipeline translated on a translation worker, with the environments it was
-    /// translated from (stored in the disk cache once the GPU thread takes it).
-    struct TranslatedGraphics {
-        std::unique_ptr<GraphicsPipeline> pipeline;
-        std::array<VideoCommon::GraphicsEnvironment, Maxwell::MaxShaderProgram> envs;
-    };
-
-    /// Whether the current Switch 2 draw may be skipped while its pipeline builds (scene
-    /// geometry, not a full screen pass). EDEN_NX2_ASYNC_SKIP=0 waits for every pipeline.
-    [[nodiscard]] bool CanSkipNativeDraw() const;
-    /// How long a native draw may still wait for its pipeline before it is skipped.
-    [[nodiscard]] std::chrono::microseconds NativeWaitAllowance() const;
-    /// Counts the time a native draw spent waiting since `start` against the window's budget.
-    void NoteNativeWait(std::chrono::steady_clock::time_point start) const;
-    mutable std::chrono::steady_clock::time_point native_wait_window{};
-    mutable std::chrono::microseconds native_wait_spent{};
-
-    /// Queues the translation of graphics_key's pipeline (native programs, environments detached
-    /// from the 3D engine) on translation_workers. False when it has to be built here.
-    bool QueueGraphicsTranslation();
-
-    /// Stores a new pipeline in the disk cache, as CreateGraphicsPipeline() does after building.
-    void StoreGraphicsPipeline(const GraphicsPipeline& pipeline, const GraphicsPipelineCacheKey& key,
-                               std::array<VideoCommon::GraphicsEnvironment, Maxwell::MaxShaderProgram>&& envs);
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
@@ -229,8 +174,6 @@ private:
     VideoCore::ShaderNotify& shader_notify;
     bool use_asynchronous_shaders{};
     bool use_vulkan_pipeline_cache{};
-    bool oot_visual_workaround{};
-    u64 visual_workaround_title{};
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
@@ -268,16 +211,27 @@ private:
     std::atomic<size_t> last_cache_size{};
     std::atomic_bool flush_in_flight{};
 
-    size_t num_pipeline_workers;
     Common::ThreadWorker workers;
     Common::ThreadWorker serialization_thread;
     DynamicFeatures dynamic_features;
-    PipelinePrebuild<GraphicsPipelineCacheKey, GraphicsPipeline> background_pipelines;
 
-    /// Pipelines being translated on translation_workers, by key.
-    ::Common::unordered_map<GraphicsPipelineCacheKey, std::future<TranslatedGraphics>> pending_graphics;
-    /// Declared last so it is destroyed first: its threads use the members above.
-    Common::ThreadWorker translation_workers;
+    /// Cached graphics pipelines boot skipped (not in used_pipelines) are built on background
+    /// threads once the game runs, so a draw that needs one finds it built instead of translating
+    /// it on the GPU thread. EDEN_NX2_BACKGROUND_PIPELINES=0 turns it off.
+    std::unique_ptr<GraphicsPipeline> TakeBackgroundPipeline(const GraphicsPipelineCacheKey& key);
+    void StopBackgroundPipelines();
+    std::mutex background_mutex;
+    /// Built and not yet asked for by a draw.
+    std::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> background_ready;
+    /// Keys the GPU thread built itself meanwhile: their background build is skipped or dropped.
+    std::unordered_set<GraphicsPipelineCacheKey> background_claimed;
+    std::atomic_bool background_active{};
+    std::atomic_bool background_stop{};
+    std::atomic<size_t> background_left{};
+    size_t background_taken{}; ///< Under background_mutex
+    std::chrono::steady_clock::time_point background_start{};
+    /// Last: destroyed (its threads joined) before the state above.
+    std::unique_ptr<Common::ThreadWorker> background_workers;
 };
 
 } // namespace Vulkan

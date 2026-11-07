@@ -8,10 +8,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <exception>
-#include <filesystem>
-#include <fstream>
 #include <functional>
-#include <mutex>
 #include <string>
 #include <unordered_set>
 #include <fmt/ranges.h>
@@ -27,13 +24,13 @@
 #include "shader_recompiler/object_pool.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
-#include "video_core/nx2_fast_draw.h"
 #include "video_core/dlss_contract.h"
 #include "video_core/fire_emblem_upscale.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/util.h"
@@ -65,6 +62,38 @@ void ShaderCache::OnCacheInvalidation(VAddr addr, size_t size) {
 void ShaderCache::SyncGuestHost() {
     std::scoped_lock lock{invalidation_mutex};
     RemovePendingShaders();
+}
+
+void ShaderCache::RefreshDebugRejections(bool unrejected) {
+    std::vector<std::pair<VAddr, VAddr>> ranges;
+    {
+        std::scoped_lock lock{lookup_mutex};
+        for (const auto& [addr, entry] : lookup_cache) {
+            const ShaderInfo* const info = entry->data;
+            if (info->lowered_native &&
+                (VideoCore::Nx2Debug::IsRejected(info->unique_hash) ||
+                 VideoCore::Nx2Debug::IsRejected(info->lowered_native->native_program_key))) {
+                ranges.emplace_back(entry->addr_start, entry->addr_end);
+            }
+        }
+    }
+    {
+        std::scoped_lock lock{invalidation_mutex};
+        for (const auto& [start, end] : ranges) {
+            InvalidatePagesInRegion(start, end - start);
+        }
+        RemovePendingShaders();
+    }
+    if (unrejected) {
+        std::scoped_lock lock{rejected_mutex};
+        rejected_native.clear();
+    }
+    // shader_infos may point at removed programs: every channel must refresh its stages.
+    for (const size_t id : active_channel_ids) {
+        channel_storage[id].maxwell3d.dirty.flags[VideoCommon::Dirty::Shaders] = true;
+    }
+    LOG_INFO(HW_GPU, "Debug server rejections applied: {} cached programs dropped{}", ranges.size(),
+             unrejected ? ", earlier rejections forgotten" : "");
 }
 
 ShaderCache::ShaderCache(Tegra::MaxwellDeviceMemoryManager& device_memory_)
@@ -286,7 +315,6 @@ void ShaderCache::RememberRejection(VAddr addr) {
                           std::memory_order_relaxed);
     rejected_highest.store((std::max)(rejected_highest.load(std::memory_order_relaxed), addr),
                            std::memory_order_relaxed);
-    page_serial.fetch_add(1, std::memory_order_release);
 }
 
 void ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
@@ -334,29 +362,8 @@ void ShaderCache::Register(std::unique_ptr<ShaderInfo> data, VAddr addr, size_t 
     }
 
     storage.push_back(std::move(data));
-    page_serial.fetch_add(1, std::memory_order_release);
 
     device_memory.UpdatePagesCachedCount(addr, size, 1);
-}
-
-u64 ShaderCache::CleanSerial(VAddr addr, size_t size) {
-    std::scoped_lock lock{invalidation_mutex};
-    const VAddr addr_end = addr + size;
-    if (addr_end > rejected_lowest.load(std::memory_order_relaxed) &&
-        addr <= rejected_highest.load(std::memory_order_relaxed)) {
-        return 0;
-    }
-    const u64 page_end = (addr_end + YUZU_PAGESIZE - 1) >> YUZU_PAGEBITS;
-    for (u64 page = addr >> YUZU_PAGEBITS; page < page_end; ++page) {
-        const auto it = invalidation_cache.find(page);
-        if (it != invalidation_cache.end() &&
-            std::ranges::any_of(it->second, [&](const Entry* entry) {
-                return entry->Overlaps(addr, addr_end);
-            })) {
-            return 0;
-        }
-    }
-    return page_serial.load(std::memory_order_relaxed);
 }
 
 void ShaderCache::InvalidatePagesInRegion(VAddr addr, size_t size) {
@@ -398,10 +405,8 @@ void ShaderCache::RemovePendingShaders() {
         lookup_cache.erase(it);
     }
     marked_for_removal.clear();
-    removal_pending.store(false, std::memory_order_release);
 
     if (!removed_shaders.empty()) {
-        Nx2FastDraw::Break(Nx2FastDraw::Reason::Invalidation);
         if (removed_shaders.size() > 16) {
             std::ranges::sort(removed_shaders, std::less<ShaderInfo*>{});
             std::erase_if(storage, [&removed_shaders](const std::unique_ptr<ShaderInfo>& shader) {
@@ -428,7 +433,6 @@ void ShaderCache::InvalidatePageEntries(std::vector<Entry*>& entries, VAddr addr
         UnmarkMemory(entry);
         RemoveEntryFromInvalidationCache(entry);
         marked_for_removal.push_back(entry);
-        removal_pending.store(true, std::memory_order_release);
     }
 }
 
@@ -478,15 +482,6 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
         info->size_bytes = env.ReadSizeBytes();
     }
     info->lowered_native = env.LoweredNative();
-    // EDEN_NX2_SHADER_DUMP: hash_map.txt pairs each program's pipeline hash (what the frame dump
-    // and the pipeline logs name) with its address (what the dumped native program is named by).
-    if (static const char* const dump_directory = std::getenv("EDEN_NX2_SHADER_DUMP");
-        dump_directory != nullptr && info->lowered_native) {
-        static std::mutex map_mutex;
-        std::scoped_lock lock{map_mutex};
-        std::ofstream map{std::filesystem::path{dump_directory} / "hash_map.txt", std::ios::app};
-        map << fmt::format("{:016x} {:x}\n", info->unique_hash, env.ProgramBase());
-    }
     const size_t size_bytes{env.SourceSizeBytes() ? env.SourceSizeBytes() : info->size_bytes};
     const ShaderInfo* const result{info.get()};
     Register(std::move(info), cpu_addr, size_bytes);

@@ -75,9 +75,7 @@ void FenceManager::WaitFence(Fence& fence) {
 }
 
 void FenceManager::SubmitDeferredWork() {
-    if (VideoCommon::GpuSplit::OnBackThread()) {
-        scheduler.FlushDeferred();
-    }
+    scheduler.FlushDeferred();
 }
 
 } // namespace Vulkan

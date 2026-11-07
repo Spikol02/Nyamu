@@ -478,10 +478,6 @@ size_t KMemoryManager::Impl::Initialize(KPhysicalAddress address, size_t size,
 
 void KMemoryManager::Impl::InitializeOptimizedMemory(KernelCore& kernel) {
     auto optimize_pa = KPageTable::GetHeapPhysicalAddress(kernel, m_management_region);
-    // Guest memory is committed as it is used (deferred backing).
-    kernel.System().DeviceMemory().buffer.MarkUsed(
-        GetInteger(optimize_pa) - Core::DramMemoryMap::Base,
-        CalculateOptimizedProcessOverheadSize(m_heap.GetSize()));
     auto* optimize_map = kernel.System().DeviceMemory().GetPointer<u64>(optimize_pa);
 
     std::memset(optimize_map, 0, CalculateOptimizedProcessOverheadSize(m_heap.GetSize()));

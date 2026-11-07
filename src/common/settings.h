@@ -264,7 +264,7 @@ struct Values {
 #endif
                                                     "cpu_backend",
                                                     Category::Cpu};
-    SwitchableSetting<CpuAccuracy, true> cpu_accuracy{linkage, CpuAccuracy::Unsafe,
+    SwitchableSetting<CpuAccuracy, true> cpu_accuracy{linkage, CpuAccuracy::Auto,
                                                       "cpu_accuracy", Category::Cpu};
     SwitchableSetting<CpuClock> cpu_clock{linkage,
                                               CpuClock::Normal,
@@ -331,11 +331,8 @@ struct Values {
                                                          linkage, true, "cpuopt_unsafe_inaccurate_nan", Category::CpuUnsafe};
     SwitchableSetting<bool> cpuopt_unsafe_fastmem_check{
                                                         linkage, true, "cpuopt_unsafe_fastmem_check", Category::CpuUnsafe};
-    // Off by default: with Unsafe accuracy (the default) the guest's exclusive pairs then lost
-    // their cross-thread checks; Kirby Air Riders' lock-free job queue aborted at random and
-    // Star Fox hung or quit at boot.
     SwitchableSetting<bool> cpuopt_unsafe_ignore_global_monitor{
-                                                                linkage, false, "cpuopt_unsafe_ignore_global_monitor", Category::CpuUnsafe};
+                                                                linkage, true, "cpuopt_unsafe_ignore_global_monitor", Category::CpuUnsafe};
 
     // Renderer
     SwitchableSetting<RendererBackend, true> renderer_backend{linkage,
@@ -349,7 +346,7 @@ struct Values {
 
     // Graphics Settings
     ResolutionScalingInfo resolution_info{};
-    SwitchableSetting<ResolutionSetup> resolution_setup{linkage, ResolutionSetup::Res1_2X,
+    SwitchableSetting<ResolutionSetup> resolution_setup{linkage, ResolutionSetup::Res1X,
                                                         "resolution_setup", Category::Renderer};
 
     SwitchableSetting<VSyncMode, true> vsync_mode{linkage,
@@ -375,7 +372,7 @@ struct Values {
 #ifdef __ANDROID__
                                                        0,
 #else
-                                                       57,
+                                                       25,
 #endif
                                                        0,
                                                        200,
@@ -420,16 +417,14 @@ struct Values {
                                                       true};
 
     SwitchableSetting<bool> post_shader_enabled{linkage,
-                                                false,
+                                                true,
                                                 "post_shader_enabled",
                                                 Category::Renderer,
                                                 Specialization::Default,
                                                 true,
                                                 true};
 
-    // On by default in Selevet performance build 10 (FSR 3 frame generation); Graphics >
-    // "Enable Frame Generation" turns it off.
-    SwitchableSetting<bool> frame_gen{linkage, true, "frame_gen", Category::Renderer,
+    SwitchableSetting<bool> frame_gen{linkage, false, "frame_gen", Category::Renderer,
                                       Specialization::Default, true, false};
 
     SwitchableSetting<FrameGenType> frame_gen_type{linkage,
@@ -525,7 +520,7 @@ struct Values {
 #ifdef __ANDROID__
                                                       GpuAccuracy::Low,
 #else
-                                                      GpuAccuracy::Low,
+                                                      GpuAccuracy::High,
 #endif
                                                       "gpu_accuracy",
                                                       Category::RendererAdvanced,
@@ -536,15 +531,13 @@ struct Values {
     GpuAccuracy current_gpu_accuracy{GpuAccuracy::High};
 
     SwitchableSetting<DmaAccuracy, true> dma_accuracy{linkage,
-                                                      DmaAccuracy::Unsafe,
+                                                      DmaAccuracy::Default,
                                                       "dma_accuracy",
                                                       Category::RendererAdvanced,
                                                       Specialization::Default,
                                                       true,
                                                       true};
 
-    // Default, as build 67 has it: with Balanced the GPU thread split (EDEN_NX2_SPLIT) stalled
-    // Mario Kart World and Kirby Air Riders as they loaded.
     SwitchableSetting<GpuFenceBehavior, true> gpu_fence_behavior{linkage,
                                                                  GpuFenceBehavior::Default,
                                                                  GpuFenceBehavior::Default,
@@ -556,7 +549,7 @@ struct Values {
                                                                  true};
 
     SwitchableSetting<VramUsageMode, true> vram_usage_mode{linkage,
-                                                           VramUsageMode::Aggressive,
+                                                           VramUsageMode::Conservative,
                                                            "vram_usage_mode",
                                                            Category::RendererAdvanced};
 
@@ -586,9 +579,10 @@ struct Values {
                                                                true,
                                                                true};
 
-    // Uncompressed, as Selevet had it: build-131's BC3 default darkened Mario Kart World's ground.
+    // BC3 by default: GPUs without ASTC otherwise keep ASTC textures as RGBA8, four times the
+    // VRAM (Mario Kart World: 7.3-7.8 GB of an 8 GB card, the rest paged into system RAM).
     SwitchableSetting<AstcRecompression, true> astc_recompression{linkage,
-                                                                  AstcRecompression::Uncompressed,
+                                                                  AstcRecompression::Bc3,
                                                                   "astc_recompression",
                                                                   Category::RendererAdvanced};
 
@@ -608,7 +602,7 @@ struct Values {
                                                   Category::RendererAdvanced};
 
     SwitchableSetting<bool> use_vulkan_driver_pipeline_cache{
-        linkage, false, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
+        linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
         Specialization::Default};
 
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
@@ -626,7 +620,7 @@ struct Values {
 #ifdef __ANDROID__
                                                   false,
 #else
-                                                  false,
+                                                  true,
 #endif
                                                   "use_reactive_flushing",
                                                   Category::RendererAdvanced};
@@ -672,7 +666,7 @@ struct Values {
 #ifdef __ANDROID__
                                                true,
 #else
-                                               true,
+                                               false,
 #endif
                                                "async_presentation", Category::RendererHacks};
 
@@ -682,7 +676,7 @@ struct Values {
     SwitchableSetting<bool> emulate_bgr565{linkage, false, "emulate_bgr565",
                                             Category::RendererHacks};
 
-    SwitchableSetting<bool> use_asynchronous_shaders{linkage, true, "use_asynchronous_shaders",
+    SwitchableSetting<bool> use_asynchronous_shaders{linkage, false, "use_asynchronous_shaders",
                                                      Category::RendererHacks};
 
     SwitchableSetting<GpuUnswizzleSize> gpu_unswizzle_texture_size{linkage,

@@ -160,14 +160,7 @@ Nx2VideoDecoder::Nx2VideoDecoder(std::string_view mime) : impl{std::make_unique<
         LOG_ERROR(HW_GPU, "nx2 video: no decoder for codec \"{}\"", mime);
         return;
     }
-    // Switch 2 movies decode on the CPU (dav1d for AV1, several threads) whatever the NVDEC
-    // setting: with GPU decoding, NVIDIA RTX 40/50 players crashed as Ocarina's title movie
-    // started. EDEN_NX2_VIDEO_HW=1 tries the GPU first again (falling back to the CPU).
-    static const bool video_hw = [] {
-        const char* value = std::getenv("EDEN_NX2_VIDEO_HW");
-        return value != nullptr && value[0] == '1';
-    }();
-    if (video_hw && Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
+    if (Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
         impl->open = impl->Open(*codec, true);
         impl->using_hardware = impl->open;
     }
