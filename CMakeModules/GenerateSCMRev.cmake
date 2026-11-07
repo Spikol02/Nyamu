@@ -14,6 +14,12 @@ endfunction()
 
 get_timestamp(BUILD_DATE)
 
+# The log names the commit: reconfigure when HEAD moves (commit, pull, checkout), as
+# Frizti/Lichii eee9f17068 does.
+if (EXISTS "${CMAKE_SOURCE_DIR}/.git/logs/HEAD")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/.git/logs/HEAD")
+endif()
+
 if (LICHII_BUILD_TAG MATCHES "^build-[0-9]+$")
     set(BUILD_VERSION "${LICHII_BUILD_TAG}")
     set(IS_DEV_BUILD false)
