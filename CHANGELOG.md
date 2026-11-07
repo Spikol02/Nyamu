@@ -41,10 +41,10 @@ emulator itself goes to those projects. Please don't report problems with Nyamu 
   including 3D report writes. This is on by default; `EDEN_NX2_PREDICT_ACQUIRE=0` turns it off.
 - `EDEN_NX2_GPU_PROFILE=1` now also logs how often that skip applies, and why it doesn't when it
   doesn't.
-- No FPS gain measured yet. With the 30 fps cap removed (`EDEN_NX2_SWAP_INTERVAL=1` and Dynamic
-  FPS on), Kokiri Forest ran at about 25–26 fps on a Ryzen 9 5900X with an RX 9070 XT before the
-  per-semaphore tracking; that version hasn't been measured yet. The default 30 fps cap is
-  unchanged.
+- Tested on a Ryzen 7 7800X3D with a Radeon RX 9070 XT. With the 30 fps cap removed
+  (`EDEN_NX2_SWAP_INTERVAL=1` and Dynamic FPS on), Kokiri Forest ran at about 25–26 fps before the
+  per-semaphore tracking and runs much smoother with it (no exact number yet). Castle Town market
+  runs at about 31–34 fps with dips. The default 30 fps cap is unchanged.
 
 ### You need
 
