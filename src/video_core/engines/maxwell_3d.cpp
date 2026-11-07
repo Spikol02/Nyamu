@@ -1628,8 +1628,8 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
     // of Time reads an occlusion report for each object (macro 0xe2c) from GPU-written pages tens
     // of thousands of times a second, and each read waited for the back. A drained read flushes
     // its whole pages and remembers the split position; later reads of those pages skip the wait
-    // while nothing sent since may write them or make draws' writes visible, and the query cache
-    // lists no report there. On with EDEN_NX2_DMA_RANGES; =0 off, =2 also drains, reads again and
+    // while nothing sent since may write them, the query cache lists no report there and the
+    // buffer cache holds no newer GPU data for them. On with EDEN_NX2_DMA_RANGES; =0 off, =2 also drains, reads again and
     // logs differences.
     static const int mode = [] {
         const char* const value = std::getenv("EDEN_NX2_DMA_SNAPSHOT");
@@ -1661,6 +1661,11 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
         if (!hit) {
             ++miss_reasons[reason];
         }
+    }
+    // The buffer cache holds newer GPU data for the bytes (draws the back already ran).
+    if (hit && memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
+        hit = false;
+        ++miss_reasons[3];
     }
     // A report's value is up to 8 bytes, listed by its first 4: look 12 bytes back. A listed
     // report may not be in guest memory yet: take the normal path.
@@ -1718,7 +1723,7 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
         LOG_INFO(HW_GPU,
                  "DMA snapshot (total): {} reads skipped the wait, {} drained, {} differed, {} "
                  "reads of listed reports; misses: {} new page, {} compute/copy, {} untracked, "
-                 "{} sync or visibility, {} ranged write",
+                 "{} GPU data in the buffer cache, {} ranged write",
                  hits, misses, differences, report_reads, miss_reasons[0], miss_reasons[1],
                  miss_reasons[2], miss_reasons[3], miss_reasons[4]);
     }

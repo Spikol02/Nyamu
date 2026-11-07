@@ -209,6 +209,14 @@ public:
         last_memory_write_position = write_position;
         last_untracked_write_position = write_position;
     }
+    /// Deferred work that releases the pending fences (puller syncpoint acquires): writes the
+    /// fence-delayed reports and semaphores, which the query cache lists until then. Counts as
+    /// an untracked write for macro memory read waits, but doesn't end EDEN_NX2_DMA_SNAPSHOT
+    /// snapshots, whose reads check the query cache instead.
+    void NoteFenceRelease() {
+        last_memory_write_position = write_position;
+        last_fence_release_position = write_position;
+    }
     /// Deferred work that writes [begin, end) only (puller semaphore releases; payloads are
     /// written at once while the split runs).
     void NoteMemoryWriteRange(GPUVAddr begin, GPUVAddr end) {
@@ -273,10 +281,11 @@ public:
     [[nodiscard]] u64 SentPosition() const {
         return write_position;
     }
-    /// EDEN_NX2_DMA_SNAPSHOT: whether work sent after position `since` may write [begin, end) or
-    /// make earlier draws' writes visible. 0 = no, else why: 1 compute or copy, 2 an untracked
-    /// write, 3 a host-level wait or visibility point, 4 an overlapping ranged write. Always 2
-    /// without EDEN_NX2_DMA_RANGES.
+    /// EDEN_NX2_DMA_SNAPSHOT: whether work sent after position `since` may write [begin, end).
+    /// 0 = no, else why: 1 compute or copy, 2 an untracked write, 4 an overlapping ranged write.
+    /// Fence releases, host-level waits and visibility points don't count (as in Frizti/Lichii):
+    /// the reader checks the query cache and the buffer cache instead. Always 2 without
+    /// EDEN_NX2_DMA_RANGES.
     [[nodiscard]] u32 MayBeWrittenSince(u64 since, GPUVAddr begin, GPUVAddr end) const {
         if (!ranges_enabled) {
             return 2;
@@ -286,9 +295,6 @@ public:
         }
         if (last_untracked_write_position > since) {
             return 2;
-        }
-        if (last_sync_position > since || last_visibility_position > since) {
-            return 3;
         }
         for (size_t i = 0; i < range_count; ++i) {
             const RangeWrite& range =
@@ -381,6 +387,7 @@ private:
     GPUVAddr next_range_end{};
     NextWrite next_write_kind{};
     u64 last_untracked_write_position{};
+    u64 last_fence_release_position{};
     u64 last_visibility_position{};
 
     enum class Kind : u64 {

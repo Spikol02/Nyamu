@@ -143,6 +143,7 @@ void GpuSplit::Stop() {
     last_sync_position = 0;
     last_memory_write_position = 0;
     last_untracked_write_position = 0;
+    last_fence_release_position = 0;
     last_visibility_position = 0;
     range_count = 0;
     range_head = 0;
@@ -277,7 +278,7 @@ void GpuSplit::RecordRange(GPUVAddr begin, GPUVAddr end) {
 bool GpuSplit::WaitForMemoryWritersIn(GPUVAddr begin, GPUVAddr end, bool gpu_pages,
                                       DrainSite site) {
     consumed_cache = consumed.load(std::memory_order_acquire);
-    u64 target = last_untracked_write_position;
+    u64 target = std::max(last_untracked_write_position, last_fence_release_position);
     bool by_range = false;
     for (size_t i = 0; i < range_count; ++i) {
         const RangeWrite& range = range_writes[(range_head + MaxRangeWrites - 1 - i) % MaxRangeWrites];
@@ -289,7 +290,7 @@ bool GpuSplit::WaitForMemoryWritersIn(GPUVAddr begin, GPUVAddr end, bool gpu_pag
             by_range = true;
         }
     }
-    const u64 untracked_target = last_untracked_write_position;
+    const u64 untracked_target = std::max(last_untracked_write_position, last_fence_release_position);
     if (gpu_pages) {
         target = std::max({target, last_writer_position, last_sync_position, last_visibility_position});
     }

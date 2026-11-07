@@ -256,7 +256,12 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
     case Puller::FenceOperation::Acquire:
         // UNIMPLEMENTED_MSG("Channel Scheduling pending.");
         // WaitFence(regs.fence_action.syncpoint_id, regs.fence_value);
-        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
+        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+            split.Defer([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
+            split.NoteFenceRelease();
+        } else {
+            dma_pusher.rasterizer->ReleaseFences();
+        }
         VideoCommon::GpuSplit::Get().NoteSync();
         break;
     case Puller::FenceOperation::Increment:
