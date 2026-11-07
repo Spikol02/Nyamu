@@ -58,6 +58,7 @@ add_executable(tests
     video_core/async_draw_policy.cpp
     video_core/native_pending_policy.cpp
     video_core/pipeline_optimization.cpp
+    video_core/pipeline_cache_policy.cpp
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
     video_core/command_snapshot_suspensions.cpp
