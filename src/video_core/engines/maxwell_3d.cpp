@@ -1630,8 +1630,10 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
     // of thousands of times a second, and each read waited for the back. A drained read flushes
     // its whole pages and remembers the split position; later reads of those pages skip the wait
     // while nothing sent since may write them, the query cache lists no report there and the
-    // buffer cache holds no newer GPU data for them. On with EDEN_NX2_DMA_RANGES; =0 off, =2 also drains, reads again and
-    // logs differences.
+    // buffer cache holds no newer GPU data for them; by default a fence release, host-level wait
+    // or visibility point since also ends a snapshot. On with EDEN_NX2_DMA_RANGES; =0 off, =3
+    // ignores fence releases and waits as Frizti's does, =2 (=4 with =3's rule) also drains,
+    // reads again and logs differences.
     static const int mode = [] {
         const char* const value = std::getenv("EDEN_NX2_DMA_SNAPSHOT");
         return value != nullptr && value[0] != '\0' ? std::atoi(value) : 1;
@@ -1654,7 +1656,9 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
     static u64 misses{};
     static u64 differences{};
     static u64 report_reads{};
-    static std::array<u64, 5> miss_reasons{};
+    static std::array<u64, 6> miss_reasons{};
+    const bool relaxed = mode == 3 || mode == 4;
+    const bool verify = mode == 2 || mode == 4;
     const GPUVAddr first_page = source & ~GPUVAddr{0xfff};
     const GPUVAddr end = source + read_bytes;
     bool hit = true;
@@ -1662,7 +1666,7 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
         const auto it = fs.dma_snapshots.find(page);
         const u32 reason = it == fs.dma_snapshots.end()
                                ? 0
-                               : split.MayBeWrittenSince(it->second, source, end);
+                               : split.MayBeWrittenSince(it->second, source, end, relaxed);
         hit = it != fs.dma_snapshots.end() && reason == 0;
         if (!hit) {
             ++miss_reasons[reason];
@@ -1671,7 +1675,7 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
     // The buffer cache holds newer GPU data for the bytes (draws the back already ran).
     if (hit && memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
         hit = false;
-        ++miss_reasons[3];
+        ++miss_reasons[5];
     }
     // A report's value is up to 8 bytes, listed by its first 4: look 12 bytes back. A listed
     // report may not be in guest memory yet: take the normal path.
@@ -1694,7 +1698,7 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
     if (hit) {
         ++hits;
         memory_manager.ReadBlockUnsafe(source, snap_words.data(), read_bytes);
-        if (mode == 2) {
+        if (verify) {
             split.Drain(VideoCommon::DrainSite::MacroDmaRead);
             flush(source, read_bytes);
             std::vector<u32> exact(words);
@@ -1729,9 +1733,9 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
         LOG_INFO(HW_GPU,
                  "DMA snapshot (total): {} reads skipped the wait, {} drained, {} differed, {} "
                  "reads of listed reports; misses: {} new page, {} compute/copy, {} untracked, "
-                 "{} GPU data in the buffer cache, {} ranged write",
+                 "{} fence release or wait, {} ranged write, {} GPU data in the buffer cache",
                  hits, misses, differences, report_reads, miss_reasons[0], miss_reasons[1],
-                 miss_reasons[2], miss_reasons[3], miss_reasons[4]);
+                 miss_reasons[2], miss_reasons[3], miss_reasons[4], miss_reasons[5]);
     }
     if (VideoCommon::Nx2Profile::Enabled()) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);

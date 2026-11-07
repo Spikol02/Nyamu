@@ -211,8 +211,8 @@ public:
     }
     /// Deferred work that releases the pending fences (puller syncpoint acquires): writes the
     /// fence-delayed reports and semaphores, which the query cache lists until then. Counts as
-    /// an untracked write for macro memory read waits, but doesn't end EDEN_NX2_DMA_SNAPSHOT
-    /// snapshots, whose reads check the query cache instead.
+    /// an untracked write for macro memory read waits; ends EDEN_NX2_DMA_SNAPSHOT snapshots
+    /// unless relaxed (=3).
     void NoteFenceRelease() {
         last_memory_write_position = write_position;
         last_fence_release_position = write_position;
@@ -287,11 +287,12 @@ public:
         return epoch;
     }
     /// EDEN_NX2_DMA_SNAPSHOT: whether work sent after position `since` may write [begin, end).
-    /// 0 = no, else why: 1 compute or copy, 2 an untracked write, 4 an overlapping ranged write.
-    /// Fence releases, host-level waits and visibility points don't count (as in Frizti/Lichii):
-    /// the reader checks the query cache and the buffer cache instead. Always 2 without
-    /// EDEN_NX2_DMA_RANGES.
-    [[nodiscard]] u32 MayBeWrittenSince(u64 since, GPUVAddr begin, GPUVAddr end) const {
+    /// 0 = no, else why: 1 compute or copy, 2 an untracked write, 3 a fence release, host-level
+    /// wait or visibility point, 4 an overlapping ranged write. With `relaxed` (as in
+    /// Frizti/Lichii) the third kind doesn't count: the reader checks the query cache and the
+    /// buffer cache instead. Always 2 without EDEN_NX2_DMA_RANGES.
+    [[nodiscard]] u32 MayBeWrittenSince(u64 since, GPUVAddr begin, GPUVAddr end,
+                                        bool relaxed) const {
         if (!ranges_enabled || since > write_position) {
             return 2;
         }
@@ -300,6 +301,10 @@ public:
         }
         if (last_untracked_write_position > since) {
             return 2;
+        }
+        if (!relaxed && (last_fence_release_position > since || last_sync_position > since ||
+                         last_visibility_position > since)) {
+            return 3;
         }
         for (size_t i = 0; i < range_count; ++i) {
             const RangeWrite& range =
