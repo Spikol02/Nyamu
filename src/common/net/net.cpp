@@ -37,7 +37,7 @@ std::vector<Asset> Release::GetPlatformAssets(std::string_view platform) const {
     const std::string host_url = "https://github.com";
     const auto path = fmt::format("/{}/releases/download/{}/", Common::g_build_auto_update_repo, tag);
     for (const auto extension : extensions) {
-        const auto filename = fmt::format("lichii-{}{}", platform, extension);
+        const auto filename = fmt::format("nyamu-{}{}", platform, extension);
         for (const auto& asset : assets) {
             if (asset == host_url + path + filename) {
                 return {{.name = platform.ends_with("-pgo") ? "PGO" : "Standard",
