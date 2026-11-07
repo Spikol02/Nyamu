@@ -8,6 +8,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <type_traits>
 
@@ -181,15 +182,29 @@ public:
     static constexpr size_t SemSlot(u64 granule) noexcept {
         return static_cast<size_t>((granule ^ (granule >> 10) ^ (granule >> 20)) & (SemSlots - 1));
     }
-    void NoteSemaphoreWrite(u64 addr) noexcept {
+    /// `payload`: the value the write stores, when the front knows it (a plain release).
+    void NoteSemaphoreWrite(u64 addr, std::optional<u32> payload = std::nullopt) noexcept {
         const u64 granule = addr >> 4;
         SemWrite& slot = sem_writes[SemSlot(granule)];
         // Evicting a write the back has not run yet: later lookups can't see it, so wait for it.
         if (slot.granule != granule && slot.position > consumed_cache) {
             sem_evicted_position = std::max(sem_evicted_position, slot.position);
         }
-        slot = {granule, write_position};
+        slot = {granule, write_position, addr, payload.value_or(0), payload.has_value()};
         last_release_position = write_position;
+    }
+    /// The value a release still queued for the back will store at `addr`, when it is the last
+    /// write sent to that granule, its value is known and no compute or copy work (which could
+    /// also write there) was sent after it. The back runs it before anything sent later, so an
+    /// acquire it meets needs no wait.
+    [[nodiscard]] std::optional<u32> QueuedRelease(u64 addr) const noexcept {
+        const SemWrite& slot = sem_writes[SemSlot(addr >> 4)];
+        if (slot.granule != addr >> 4 || !slot.known || slot.addr != addr ||
+            slot.position < last_writer_position ||
+            slot.position <= consumed.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+        return slot.payload;
     }
     void NoteAnyRelease() noexcept {
         last_release_position = write_position;
@@ -273,6 +288,9 @@ private:
     struct SemWrite {
         u64 granule{~u64{0}};
         u64 position{};
+        u64 addr{};
+        u32 payload{};
+        bool known{};
     };
     std::array<SemWrite, SemSlots> sem_writes{};
     u64 sem_evicted_position{};
