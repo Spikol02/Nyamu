@@ -1075,6 +1075,7 @@ struct Maxwell3D::FrontState {
     /// EDEN_NX2_DMA_SNAPSHOT: GPU pages a drained macro memory read flushed whole, and the split
     /// position right after it. Cleared past 8192 pages.
     std::unordered_map<GPUVAddr, u64> dma_snapshots;
+    u64 dma_snapshot_epoch{};
     u64 calls{};
     /// A method the draw manager handles was sent since the back last ran DrawDeferred: only
     /// then can it have a deferred instanced draw to issue at the end of a macro.
@@ -1643,6 +1644,11 @@ bool Maxwell3D::FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& f
     if (!device ||
         memory_manager.GpuToCpuAddress(source + read_bytes - 1) != *device + read_bytes - 1) {
         return false;
+    }
+    if (fs.dma_snapshot_epoch != split.Epoch()) {
+        // The split restarted (an accuracy change): its ring positions started over.
+        fs.dma_snapshots.clear();
+        fs.dma_snapshot_epoch = split.Epoch();
     }
     static u64 hits{};
     static u64 misses{};

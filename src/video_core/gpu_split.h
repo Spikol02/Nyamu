@@ -281,13 +281,18 @@ public:
     [[nodiscard]] u64 SentPosition() const {
         return write_position;
     }
+    /// Changes each time the split starts: ring positions from an earlier run mean nothing
+    /// (Stop resets them to 0).
+    [[nodiscard]] u64 Epoch() const {
+        return epoch;
+    }
     /// EDEN_NX2_DMA_SNAPSHOT: whether work sent after position `since` may write [begin, end).
     /// 0 = no, else why: 1 compute or copy, 2 an untracked write, 4 an overlapping ranged write.
     /// Fence releases, host-level waits and visibility points don't count (as in Frizti/Lichii):
     /// the reader checks the query cache and the buffer cache instead. Always 2 without
     /// EDEN_NX2_DMA_RANGES.
     [[nodiscard]] u32 MayBeWrittenSince(u64 since, GPUVAddr begin, GPUVAddr end) const {
-        if (!ranges_enabled) {
+        if (!ranges_enabled || since > write_position) {
             return 2;
         }
         if (last_writer_position > since) {
@@ -388,6 +393,7 @@ private:
     NextWrite next_write_kind{};
     u64 last_untracked_write_position{};
     u64 last_fence_release_position{};
+    u64 epoch{};
     u64 last_visibility_position{};
 
     enum class Kind : u64 {
