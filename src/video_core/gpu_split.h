@@ -197,14 +197,29 @@ public:
     /// write sent to that granule, its value is known and no compute or copy work (which could
     /// also write there) was sent after it. The back runs it before anything sent later, so an
     /// acquire it meets needs no wait.
-    [[nodiscard]] std::optional<u32> QueuedRelease(u64 addr) const noexcept {
+    enum class ReleaseMiss : u8 { None, NoWrite, OtherAddress, UnknownValue, WriterAfter, Ran };
+    struct ReleaseLookup {
+        std::optional<u32> value;
+        ReleaseMiss miss{};
+    };
+    [[nodiscard]] ReleaseLookup QueuedRelease(u64 addr) const noexcept {
         const SemWrite& slot = sem_writes[SemSlot(addr >> 4)];
-        if (slot.granule != addr >> 4 || !slot.known || slot.addr != addr ||
-            slot.position < last_writer_position ||
-            slot.position <= consumed.load(std::memory_order_acquire)) {
-            return std::nullopt;
+        if (slot.granule != addr >> 4) {
+            return {std::nullopt, ReleaseMiss::NoWrite};
         }
-        return slot.payload;
+        if (slot.addr != addr) {
+            return {std::nullopt, ReleaseMiss::OtherAddress};
+        }
+        if (!slot.known) {
+            return {std::nullopt, ReleaseMiss::UnknownValue};
+        }
+        if (slot.position < last_writer_position) {
+            return {std::nullopt, ReleaseMiss::WriterAfter};
+        }
+        if (slot.position <= consumed.load(std::memory_order_acquire)) {
+            return {std::nullopt, ReleaseMiss::Ran};
+        }
+        return {slot.payload, ReleaseMiss::None};
     }
     void NoteAnyRelease() noexcept {
         last_release_position = write_position;

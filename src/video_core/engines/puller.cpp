@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <optional>
@@ -71,14 +72,30 @@ template <typename Matches>
 bool QueuedReleaseMeets(GPUVAddr address, const Matches& matches) {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_PREDICT_ACQUIRE");
-        return value == nullptr || value[0] != '0';
+        const bool on = value == nullptr || value[0] != '0';
+        LOG_INFO(HW_GPU, "Acquires met by a queued release skip the wait: {}", on ? "on" : "off");
+        return on;
     }();
     auto& split = VideoCommon::GpuSplit::Get();
     if (!enabled || !split.Active()) {
         return false;
     }
-    const std::optional<u32> value = split.QueuedRelease(address);
-    return value && matches(*value);
+    using VideoCommon::Nx2Profile::Counter;
+    using Miss = VideoCommon::GpuSplit::ReleaseMiss;
+    const auto lookup = split.QueuedRelease(address);
+    if (VideoCommon::Nx2Profile::Enabled()) {
+        static constexpr std::array miss_counters{
+            Counter::PredictMet,          Counter::PredictNoWrite,
+            Counter::PredictOtherAddress, Counter::PredictUnknownValue,
+            Counter::PredictWriterAfter,  Counter::PredictRan,
+        };
+        Counter counter = miss_counters[static_cast<size_t>(lookup.miss)];
+        if (lookup.miss == Miss::None && !matches(*lookup.value)) {
+            counter = Counter::PredictNotMet;
+        }
+        VideoCommon::Nx2Profile::Add(counter, 1);
+    }
+    return lookup.value && matches(*lookup.value);
 }
 
 // The fence manager records into the scheduler and downloads the CPU's writes over GPU data:
@@ -111,6 +128,7 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (Nx2SemaphoreWaiters::Get().Latched(this)) {
         return true;
     }
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ResumeChecks, 1);
     if (QueuedReleaseMeets(pending_acquire->address,
                            [this](u32 value) { return pending_acquire->Matches(value); })) {
         return true;
