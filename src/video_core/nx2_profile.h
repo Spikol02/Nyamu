@@ -4,11 +4,6 @@
 #pragma once
 
 #include <array>
-#ifdef _MSC_VER
-#include <intrin.h>
-#elif defined(ARCHITECTURE_x86_64)
-#include <x86intrin.h>
-#endif
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -75,32 +70,26 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "writer wait", "list submit wait", "list GPU wait",
 };
 
-// Read once, on first use: Enabled() runs several times per method write. Not at static
-// initialisation: nx2_switches.txt sets the variable only once the frontend starts, so a global
-// read it before the file was applied and the switch never took effect from there.
-// Off while EDEN_NX2_SAMPLE_PROFILE samples (common/nx2_sample_profile.h): the zone timers would
-// show up in the samples.
+// Read once at startup: Enabled() runs several times per method write (no guard to check).
+// EDEN_NX2_GPU_PROFILE=drains times only the front's waits for the back: the zones cost the back
+// about 45% of its time.
+inline const char* const g_profile_env = std::getenv("EDEN_NX2_GPU_PROFILE");
+inline const bool g_drains_only =
+    g_profile_env != nullptr && std::string_view{g_profile_env} == "drains";
+inline const bool g_enabled = g_profile_env != nullptr && !g_drains_only;
+
 inline bool Enabled() {
-    static const bool enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr &&
-                                std::getenv("EDEN_NX2_SAMPLE_PROFILE") == nullptr;
-    return enabled;
+    return g_enabled;
+}
+
+inline bool DrainsEnabled() {
+    return g_enabled || g_drains_only;
 }
 
 // Nanoseconds; from the host's own counter where the wall clock reads it directly (the zones
 // run ~150,000 times a second, and QueryPerformanceCounter cost ~5% of the GPU thread).
 inline u64 Now() {
     return static_cast<u64>(Common::g_wall_clock.GetTimeNS().count());
-}
-
-// What the zones and drain waits measure in: the time stamp counter without the fences the wall
-// clock reads it with (those fences cost ~10% of the GPU back thread with ~45,000 draws a
-// second). Report converts it with the wall clock.
-inline u64 Ticks() {
-#ifdef ARCHITECTURE_x86_64
-    return __rdtsc();
-#else
-    return Now();
-#endif
 }
 
 struct ThreadData {
@@ -111,7 +100,6 @@ struct ThreadData {
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
     u64 window_start{};
-    u64 window_start_ticks{};
     std::optional<u64> cpu_start_ns;
 };
 
@@ -125,14 +113,14 @@ public:
         }
         parent_child_ns = t_data.child_ns;
         t_data.child_ns = 0;
-        start = Ticks();
+        start = Now();
     }
 
     ~Scope() {
         if (!enabled) {
             return;
         }
-        const u64 elapsed = Ticks() - start;
+        const u64 elapsed = Now() - start;
         auto& data = t_data;
         const auto index = static_cast<size_t>(zone);
         data.exclusive_ns[index] += elapsed - data.child_ns;
@@ -175,11 +163,11 @@ inline void Add(Counter counter, u64 amount) {
     }
 }
 
-/// The front waited for the back since `start` (Ticks) for `site`.
+/// The front waited for the back since `start` (Now) for `site`.
 inline void AddDrain(DrainSite site, u64 start) {
-    if (Enabled()) {
+    if (DrainsEnabled()) {
         const auto index = static_cast<size_t>(site);
-        t_data.drain_ns[index] += Ticks() - start;
+        t_data.drain_ns[index] += Now() - start;
         ++t_data.drain_count[index];
     }
 }
@@ -187,14 +175,13 @@ inline void AddDrain(DrainSite site, u64 start) {
 /// Called by the GPU thread (and the split's back thread) between commands: logs and resets
 /// the totals every 10 s.
 inline void Report(const char* thread_name = "GPU thread") {
-    if (!Enabled()) {
+    if (!DrainsEnabled()) {
         return;
     }
     auto& data = t_data;
     const u64 now = Now();
     if (data.window_start == 0) {
         data.window_start = now;
-        data.window_start_ticks = Ticks();
         data.cpu_start_ns = Common::CurrentThreadCpuTimeNs();
         data.child_ns = 0;
         return;
@@ -204,21 +191,23 @@ inline void Report(const char* thread_name = "GPU thread") {
         return;
     }
     const auto cpu_now = Common::CurrentThreadCpuTimeNs();
-    const u64 now_ticks = Ticks();
-    const u64 window_ticks = (std::max<u64>)(now_ticks - data.window_start_ticks, 1);
     // Time in no zone at all is the wall time minus the zones' totals.
     u64 zoned{};
     for (size_t i = 1; i < data.exclusive_ns.size(); ++i) {
         zoned += data.exclusive_ns[i];
     }
-    data.exclusive_ns[0] = window_ticks > zoned ? window_ticks - zoned : 0;
+    data.exclusive_ns[0] = window > zoned ? window - zoned : 0;
     std::string line;
+    if (g_drains_only) {
+        data.exclusive_ns = {};
+        data.count = {};
+    }
     for (size_t i = 0; i < data.exclusive_ns.size(); ++i) {
         if (data.exclusive_ns[i] == 0 && data.count[i] == 0) {
             continue;
         }
         // Per second of wall time: milliseconds spent and calls made.
-        const double ms = static_cast<double>(data.exclusive_ns[i]) * 1000.0 / window_ticks;
+        const double ms = static_cast<double>(data.exclusive_ns[i]) * 1000.0 / window;
         const double calls = static_cast<double>(data.count[i]) * 1e9 / window;
         line += fmt::format(" | {} {:.1f} ms ({:.0f}/s)", zone_names[i], ms, calls);
     }
@@ -238,7 +227,7 @@ inline void Report(const char* thread_name = "GPU thread") {
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
         if (data.drain_count[i] != 0) {
             drains += fmt::format(" {} {:.1f} ms ({:.0f}/s),", drain_site_names[i],
-                                  static_cast<double>(data.drain_ns[i]) * 1000.0 / window_ticks,
+                                  static_cast<double>(data.drain_ns[i]) * 1000.0 / window,
                                   static_cast<double>(data.drain_count[i]) * 1e9 / window);
         }
     }
@@ -257,7 +246,6 @@ inline void Report(const char* thread_name = "GPU thread") {
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};
     data.window_start = now;
-    data.window_start_ticks = now_ticks;
     data.cpu_start_ns = cpu_now;
 }
 

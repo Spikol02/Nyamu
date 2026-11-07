@@ -151,7 +151,6 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     /// The most device memory the collector lets the cache fill before it collects in earnest,
     /// on every GPU (ApplyThresholdOverrides).
     static constexpr u64 MaxCriticalMemory = 5_GiB;
-    u64 large_budget_cap{}; ///< Raises MaxCriticalMemory on cards with a 12 GiB+ budget
     static constexpr size_t GC_EMERGENCY_COUNTS = 2;
 
     using Runtime = typename P::Runtime;
@@ -277,15 +276,6 @@ public:
     /// Mark images in a range as modified from the CPU
     void WriteMemory(DAddr cpu_addr, size_t size);
 
-    /// EDEN_NX2_INLINE_INVALIDATE: changes whenever an image is registered.
-    [[nodiscard]] u64 PageSerial() const noexcept {
-        return page_serial.load(std::memory_order_acquire);
-    }
-
-    /// The page serial when no image overlaps [cpu_addr, cpu_addr + size), else 0.
-    /// @pre mutex is locked
-    [[nodiscard]] u64 CleanSerial(DAddr cpu_addr, size_t size);
-
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);
 
@@ -358,8 +348,6 @@ public:
     void PrepareImage(ImageId image_id, bool is_modification, bool invalidate);
 
     Common::SpinRecursiveMutex mutex;
-
-    std::atomic<u64> page_serial{1};
 
 private:
     /// Iterate over all page indices in a range
@@ -588,13 +576,6 @@ private:
     using PendingDownload = PendingImageDownload<Image>;
 
     Common::SlotVector<Image> slot_images;
-    /// EDEN_NX2_GPU_PROFILE: images created and deleted in the current 10 s window.
-    struct ChurnStats {
-        std::chrono::steady_clock::time_point window_start{};
-        u64 created{};
-        u64 created_large{};
-        u64 deleted{};
-    } churn_stats;
     Common::SlotVector<ImageMapView> slot_map_views;
     Common::SlotVector<ImageView> slot_image_views;
     Common::SlotVector<ImageAlloc> slot_image_allocs;

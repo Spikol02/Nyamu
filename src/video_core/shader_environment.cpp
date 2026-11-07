@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <thread>
@@ -36,6 +37,7 @@
 #include "shader_recompiler/frontend/ampere/program_address_map.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/textures/texture.h"
@@ -47,6 +49,13 @@ constexpr std::array<char, 8> MAGIC_NUMBER{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h
 constexpr size_t INST_SIZE = sizeof(u64);
 
 using Maxwell = Tegra::Engines::Maxwell3D::Regs;
+
+// The shader hash of lowered native code (frame dump "shaders", pipeline cache keys), with a
+// version tag that isolates this experimental ABI.
+static u64 NativeShaderHash(std::span<const u64> code) {
+    return Common::CityHash64(reinterpret_cast<const char*>(code.data()), code.size() * sizeof(u64)) ^
+           0x4f554e4345000002ULL;
+}
 
 static u64 MakeCbufKey(u32 index, u32 offset) {
     return (static_cast<u64>(index) << 32) | offset;
@@ -221,8 +230,7 @@ bool GenericEnvironment::IsCbufIndirectStorageBufferPointer(u32 index, u32 offse
 std::optional<u64> GenericEnvironment::Analyze() {
     if (native_source_size) {
         // Include the converted header and a version tag to isolate this experimental ABI.
-        return Common::CityHash64(reinterpret_cast<const char*>(code.data()),
-                                  code.size() * sizeof(u64)) ^ 0x4f554e4345000002ULL;
+        return NativeShaderHash(code);
     }
     const std::optional<u64> size{TryFindSize()};
     if (!size) {
@@ -256,13 +264,6 @@ size_t GenericEnvironment::CachedSizeBytes() const noexcept {
 
 size_t GenericEnvironment::ReadSizeBytes() const noexcept {
     return read_highest - read_lowest + INST_SIZE;
-}
-
-const char* GenericEnvironment::DebugWhyNotSerializable() const noexcept {
-    if (has_unbound_instructions) {
-        return "read instructions outside its cached code";
-    }
-    return "has a native trap prefix";
 }
 
 bool GenericEnvironment::CanBeSerialized() const noexcept {
@@ -344,6 +345,7 @@ void GenericEnvironment::Serialize(std::ofstream& file) const {
                        sizeof(gp_passthrough_mask));
         }
         if (stage == Shader::Stage::Task || stage == Shader::Stage::Mesh) {
+            // Task and mesh programs are translated with these (none were stored before).
             file.write(reinterpret_cast<const char*>(&mesh_registers), sizeof(mesh_registers))
                 .write(reinterpret_cast<const char*>(&mesh_primitive_header),
                        sizeof(mesh_primitive_header));
@@ -384,14 +386,8 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
     return std::nullopt;
 }
 
-// Read once per handle: the type, the format and the integer query of a texture all come from the
-// same descriptor, and a translation asks again for every instruction using it. The first read is
-// also the one Serialize records.
 Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                                              bool via_header_index, u32 raw) {
-    if (const auto it = texture_descriptors.find(raw); it != texture_descriptors.end()) {
-        return it->second;
-    }
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
                                                        gpu_memory->UsesNativeTiling())};
@@ -415,7 +411,6 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                         entry.raw[0], entry.raw[1], entry.raw[2], entry.raw[3]);
         }
     }
-    texture_descriptors.emplace(raw, entry);
     return entry;
 }
 
@@ -469,25 +464,6 @@ private:
     GPUVAddr page_begin{};
     GPUVAddr page_end{};
 };
-
-// The ten programs of Ocarina of Time's upscaler network (16 to 768 HMMA each), keyed by
-// NativeProgramKey of their instructions up to their first HMMA (Nemyu 9e801b7e59): a change to
-// where a capture ends doesn't move that prefix.
-bool IsOcarinaUpscalerNetwork(std::span<const Shader::Ampere::Instruction> native) {
-    static constexpr std::array<u64, 10> keys{
-        0xa299992886770550ULL, 0x9494bc9dacb4f348ULL, 0xccc7db48e3f698a9ULL, 0xbe2243e10bdf1756ULL,
-        0xee06efff6da7695bULL, 0x3161510215a7cf93ULL, 0xddaf9c23e3ab6670ULL, 0xebe72ecc1b836eeaULL,
-        0x06b33e97edf25650ULL, 0x8ba104f62a15f4d4ULL,
-    };
-    const auto hmma = std::ranges::find_if(native, [](const Shader::Ampere::Instruction& instruction) {
-        return instruction.Bits(0, 12) == 0x23c;
-    });
-    if (hmma == native.end()) {
-        return false;
-    }
-    const auto prefix = native.first(static_cast<size_t>(hmma - native.begin()) + 1);
-    return std::ranges::find(keys, Shader::Ampere::NativeProgramKey(prefix)) != keys.end();
-}
 
 } // Anonymous namespace
 
@@ -568,16 +544,9 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
                                    : stage == Shader::Stage::TessellationEval
                                        ? Shader::Ampere::TessellationStage::Evaluation
                                        : Shader::Ampere::TessellationStage::None;
-    // Ocarina of Time stands in for its upscaler network only; its other tensor programs (scene
-    // passes, its 1080p upscaler) have no stand-in, and rejected they left pink and green noise.
-    constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
-    const bool reject_matrix =
-        reject_native_matrix && (Settings::GetCurrentProgramID() != OcarinaOfTimeProgramId ||
-                                 IsOcarinaUpscalerNetwork(native));
     auto lowered = Shader::Ampere::LowerToMaxwell(
         native, {.geometry = geometry_stage,
                  .tensor = true,
-                 .reject_matrix = reject_matrix,
                  .native_code_address = program_base + native_header_size,
                  .verified_traps = verified_traps,
                  .tessellation_stage = tessellation_stage});
@@ -701,6 +670,31 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     // unreachable data. Existing disk-cache serialization carries it with code.
     lowered_code.push_back(0);
     Shader::Ampere::AppendNativeAddressMap(lowered_code, lowered.source_instruction_offsets);
+    // EDEN_NX2_REJECT_HASH=<hash>,...: like EDEN_NX2_REJECT, but by native program key (shader
+    // dump file names) or shader hash (frame dump "shaders"), which stay the same between runs.
+    if (static const std::string reject_hashes = [] {
+            const char* text = std::getenv("EDEN_NX2_REJECT_HASH");
+            std::string list = text ? "," + std::string{text} + "," : std::string{};
+            std::ranges::transform(list, list.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return list;
+        }();
+        !reject_hashes.empty()) {
+        for (const u64 hash : {result->native_program_key, NativeShaderHash(lowered_code)}) {
+            if (reject_hashes.find(fmt::format(",{:016x},", hash)) != std::string::npos) {
+                throw Shader::RuntimeError("Native shader at {:#x} ({:016x}) rejected by EDEN_NX2_REJECT_HASH",
+                                           program_base, hash);
+            }
+        }
+    }
+    // The same list, changed at runtime by the debug server (docs/nx2/debug-mcp.md).
+    if (VideoCore::Nx2Debug::AnyRejected()) {
+        for (const u64 hash : {result->native_program_key, NativeShaderHash(lowered_code)}) {
+            if (VideoCore::Nx2Debug::IsRejected(hash)) {
+                throw Shader::RuntimeError("Native shader at {:#x} ({:016x}) rejected by the debug server",
+                                           program_base, hash);
+            }
+        }
+    }
     LOG_DEBUG(Shader, "Lowered native shader at {:#x}: {} source bytes, {} instructions",
               program_base, result->source_size, lowered.instructions.size());
     return result;
@@ -868,96 +862,14 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
 }
 
 u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
+    const auto& cbuf{maxwell3d->state.shader_stages[stage_index].const_buffers[cbuf_index]};
+    ASSERT(cbuf.enabled);
     u32 value{};
-    if (snapshot) {
-        const auto& cbuf{snapshot->const_buffers[cbuf_index]};
-        ASSERT(cbuf.enabled);
-        if (cbuf_offset < cbuf.size && cbuf_offset + sizeof(u32) <= cbuf.bytes.size()) {
-            std::memcpy(&value, cbuf.bytes.data() + cbuf_offset, sizeof(value));
-        }
-    } else {
-        const auto& cbuf{maxwell3d->state.shader_stages[stage_index].const_buffers[cbuf_index]};
-        ASSERT(cbuf.enabled);
-        if (cbuf_offset < cbuf.size) {
-            value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
-        }
+    if (cbuf_offset < cbuf.size) {
+        value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
     }
     cbuf_values.emplace(MakeCbufKey(cbuf_index, cbuf_offset), value);
     return value;
-}
-
-std::shared_ptr<const GraphicsEnvironment::TexturePool> GraphicsEnvironment::CopyTexturePool(
-    Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager& gpu_memory) {
-    // 32k entries are 1 MiB; a larger pool is translated on the GPU thread as before.
-    constexpr u32 MaxTexturePoolEntries = 1U << 15;
-    const auto& regs{maxwell3d.regs};
-    if (regs.tex_header.limit >= MaxTexturePoolEntries) {
-        return nullptr;
-    }
-    const GPUVAddr address{regs.tex_header.Address()};
-    const size_t entries{size_t{regs.tex_header.limit} + 1};
-    const size_t size{entries * sizeof(Tegra::Texture::TICEntry)};
-    if (!gpu_memory.IsFullyMappedRange(address, size)) {
-        return nullptr;
-    }
-    auto pool{std::make_shared<TexturePool>(entries)};
-    gpu_memory.ReadBlock(address, pool->data(), size);
-    return pool;
-}
-
-bool GraphicsEnvironment::Detach(std::shared_ptr<const TexturePool> texture_pool) {
-    if (!maxwell3d || snapshot || !IsNativeProgram()) {
-        return false;
-    }
-    auto copy{std::make_shared<EngineSnapshot>()};
-    const auto& live{maxwell3d->state.shader_stages[stage_index].const_buffers};
-    for (size_t index = 0; index < live.size(); ++index) {
-        auto& copied{copy->const_buffers[index]};
-        copied.enabled = live[index].enabled;
-        if (!live[index].enabled || live[index].size == 0) {
-            continue;
-        }
-        // The size register can exceed what a constant buffer holds; never copy more than that.
-        copied.size = (std::min)(live[index].size,
-                                 static_cast<u32>(Tegra::Engines::Maxwell3D::Regs::MaxConstBufferSize));
-        copied.bytes.resize(copied.size + sizeof(u32));
-        gpu_memory->ReadBlockUnsafe(live[index].address, copied.bytes.data(), copied.bytes.size());
-    }
-    const auto& regs{maxwell3d->regs};
-    copy->texture_pool = std::move(texture_pool);
-    copy->tic_address = regs.tex_header.Address();
-    copy->tic_limit = regs.tex_header.limit;
-    copy->via_header_index = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding;
-    copy->viewport_scale_offset_enabled = regs.viewport_scale_offset_enabled;
-    if (has_hle_engine_state) {
-        copy->replace_table = maxwell3d->replace_table;
-    }
-    snapshot = std::move(copy);
-    return true;
-}
-
-Tegra::Texture::TICEntry GraphicsEnvironment::TextureEntry(u32 handle) {
-    if (!snapshot) {
-        const auto& regs{maxwell3d->regs};
-        const bool via_header_index{regs.sampler_binding ==
-                                    Maxwell::SamplerBinding::ViaHeaderBinding};
-        return ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index,
-                               handle);
-    }
-    if (!snapshot->texture_pool) {
-        // Read from the live pool; TexturesMatch checks the answers before the pipeline is used.
-        return ReadTextureInfo(snapshot->tic_address, snapshot->tic_limit, snapshot->via_header_index,
-                               handle);
-    }
-    // As ReadTextureInfo reads it, from the copied pool.
-    const auto pair{Tegra::Texture::TexturePair(handle, snapshot->via_header_index)};
-    const u32 index{Tegra::Texture::TextureHeaderIndex(pair.first, snapshot->tic_limit,
-                                                       gpu_memory->UsesNativeTiling())};
-    const auto& pool{*snapshot->texture_pool};
-    if (index >= pool.size()) {
-        return {};
-    }
-    return pool[index];
 }
 
 std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffer(u32 bank,
@@ -966,9 +878,8 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
         return std::nullopt;
     }
     const u64 key = (static_cast<u64>(bank) << 32) | static_cast<u64>(offset);
-    const auto& table{snapshot ? snapshot->replace_table : maxwell3d->replace_table};
-    auto it = table.find(key);
-    if (it == table.end()) {
+    auto it = maxwell3d->replace_table.find(key);
+    if (it == maxwell3d->replace_table.end()) {
         return std::nullopt;
     }
     const auto converted_value = [](Tegra::Engines::Maxwell3D::HLEReplacementAttributeType name) {
@@ -988,14 +899,20 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
 }
 
 Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
-    const auto entry{TextureEntry(handle)};
+    const auto& regs{maxwell3d->regs};
+    const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+    auto entry =
+        ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index, handle);
     const Shader::TextureType result{ConvertTextureType(entry)};
     texture_types.emplace(handle, result);
     return result;
 }
 
 Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handle) {
-    const auto entry{TextureEntry(handle)};
+    const auto& regs{maxwell3d->regs};
+    const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+    auto entry =
+        ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index, handle);
     const Shader::TexturePixelFormat result(ConvertTexturePixelFormat(entry));
     texture_pixel_formats.emplace(handle, result);
     return result;
@@ -1006,32 +923,9 @@ bool GraphicsEnvironment::IsTexturePixelFormatInteger(u32 handle) {
         static_cast<VideoCore::Surface::PixelFormat>(ReadTexturePixelFormat(handle)));
 }
 
-bool GraphicsEnvironment::TexturesMatch(Tegra::Engines::Maxwell3D& maxwell3d_) {
-    if (!snapshot || snapshot->texture_pool) {
-        return true;
-    }
-    const auto& regs{maxwell3d_.regs};
-    const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
-    const auto live = [&](u32 handle) {
-        return ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index,
-                               handle);
-    };
-    for (const auto& [handle, type] : texture_types) {
-        if (ConvertTextureType(live(handle)) != type) {
-            return false;
-        }
-    }
-    for (const auto& [handle, format] : texture_pixel_formats) {
-        if (ConvertTexturePixelFormat(live(handle)) != format) {
-            return false;
-        }
-    }
-    return true;
-}
-
 u32 GraphicsEnvironment::ReadViewportTransformState() {
-    viewport_transform_state = snapshot ? snapshot->viewport_scale_offset_enabled
-                                        : maxwell3d->regs.viewport_scale_offset_enabled;
+    const auto& regs{maxwell3d->regs};
+    viewport_transform_state = regs.viewport_scale_offset_enabled;
     return viewport_transform_state;
 }
 
@@ -1051,7 +945,6 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
     if (kepler_compute->IsNativeMode()) {
         initial_offset = sizeof(sph);
         is_proprietary_driver = true;
-        reject_native_matrix = !kepler_compute->EmulatesNativeTensorPrograms();
         InitializeNativeCode(std::move(lowered_native_), 0);
         start_address = sizeof(sph);
     }
@@ -1233,16 +1126,6 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
     is_proprietary_driver = texture_bound == 2 || Shader::Ampere::HasNativeAddressMap(code);
 }
 
-size_t FileEnvironment::MemorySize() const {
-    const auto map_bytes = [](const auto& map) {
-        return (map.bucket_count() + 1) *
-               (sizeof(typename std::decay_t<decltype(map)>::value_type) + 2);
-    };
-    return sizeof(*this) + code.capacity() * sizeof(u64) + map_bytes(texture_types) +
-           map_bytes(texture_pixel_formats) + map_bytes(cbuf_values) +
-           map_bytes(storage_pointer_types) + map_bytes(cbuf_replacements);
-}
-
 void FileEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {
     DumpImpl(pipeline_hash, shader_hash, code, read_highest, read_lowest, initial_offset, stage);
 }
@@ -1355,14 +1238,6 @@ void SerializePipeline(std::span<const char> key, std::span<const GenericEnviron
             .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version));
     }
     if (!std::ranges::all_of(envs, &GenericEnvironment::CanBeSerialized)) {
-        if (static std::atomic<u32> logged{}; logged.fetch_add(1) < 32) {
-            for (const GenericEnvironment* const env : envs) {
-                if (!env->CanBeSerialized()) {
-                    LOG_INFO(Render_Vulkan, "Pipeline not stored on disk: a stage {}",
-                             env->DebugWhyNotSerializable());
-                }
-            }
-        }
         return;
     }
     const u32 num_envs{static_cast<u32>(envs.size())};

@@ -72,34 +72,10 @@ inline void Nx2MarkCommandListPage(u64 device_address) {
     return (g_nx2_command_list_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1;
 }
 
-// Pages seen not GPU-written at a point where no queued work could have written them first
-// (EDEN_NX2_DMA_RANGES for macro memory reads, EDEN_NX2_LIST_TRUST for command lists). Index 0:
-// macro reads (no compute, copy or earlier draw work queued), 1: command lists (no compute or copy
-// queued). Front thread only.
-inline std::array<std::array<u64, (u64{1} << (36 - Nx2WrittenPageBits)) / 64>, 2> g_nx2_clean_pages{};
-
-[[nodiscard]] inline bool Nx2IsCleanPage(size_t kind, u64 device_address) {
-    const u64 page = device_address >> Nx2WrittenPageBits;
-    if (page >= g_nx2_clean_pages[kind].size() * 64) {
-        return false;
-    }
-    return (g_nx2_clean_pages[kind][page / 64] >> (page % 64)) & 1;
-}
-
-inline void Nx2MarkCleanPage(size_t kind, u64 device_address) {
-    const u64 page = device_address >> Nx2WrittenPageBits;
-    if (page < g_nx2_clean_pages[kind].size() * 64) {
-        g_nx2_clean_pages[kind][page / 64] |= u64{1} << (page % 64);
-    }
-}
-
 /// A new emulation session starts: no page has been written by its GPU yet.
 inline void Nx2ClearGpuWrittenPages() {
     for (auto& word : g_nx2_gpu_written_pages) {
         word.store(0, std::memory_order_relaxed);
-    }
-    for (auto& kind : g_nx2_clean_pages) {
-        kind.fill(0);
     }
     for (auto& word : g_nx2_command_list_pages) {
         word.store(0, std::memory_order_relaxed);

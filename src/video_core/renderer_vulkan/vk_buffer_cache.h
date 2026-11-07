@@ -121,10 +121,6 @@ public:
         return (vertex_repack_mask & (1U << binding)) != 0;
     }
 
-    bool AnyVertexRepacked() const {
-        return vertex_repack_mask != 0;
-    }
-
     u64 CurrentTick();
 
     bool IsFree(u64 tick);
@@ -135,8 +131,6 @@ public:
     void WaitSubmittedTick(u64 tick);
 
     void Finish();
-
-    void FinishForHostRead();
 
     u64 GetDeviceLocalMemory() const;
 
@@ -327,6 +321,12 @@ private:
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();
+
+    VkBuffer bound_index_buffer = VK_NULL_HANDLE;
+    VkDeviceSize bound_index_offset = 0;
+    VkIndexType bound_index_type = VK_INDEX_TYPE_UINT32;
+    u64 bound_index_epoch = 0;
+    bool bound_index_valid = false;
 };
 
 struct BufferCacheParams {

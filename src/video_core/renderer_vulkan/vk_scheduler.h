@@ -25,9 +25,8 @@
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
-#include "video_core/gpu_wait_site.h"
+#include "video_core/renderer_vulkan/vk_gpu_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
-#include "video_core/renderer_vulkan/vk_parallel_record.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace VideoCommon {
@@ -88,6 +87,17 @@ public:
     template <typename Func>
     void TraceGpuWork(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
                       std::array<u32, 3> size, Func&& work) {
+        if (auto& breadcrumbs = GpuBreadcrumbs::Get(); breadcrumbs.Enabled()) [[unlikely]] {
+            breadcrumbs.Wrap(cmdbuf, hash, fragment_hash, size,
+                             [&] { TraceGpuWorkTimed(cmdbuf, hash, fragment_hash, size, work); });
+            return;
+        }
+        TraceGpuWorkTimed(cmdbuf, hash, fragment_hash, size, work);
+    }
+
+    template <typename Func>
+    void TraceGpuWorkTimed(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
+                           std::array<u32, 3> size, Func&& work) {
         if (!trace_gpu_recording || !trace_work_pool || trace_work_count == TraceMaxWork) {
             work();
             return;
@@ -146,18 +156,17 @@ public:
         return state.renderpass != VK_NULL_HANDLE;
     }
 
-    /// Changes whenever a render pass begins or ends.
-    u64 RenderPassSerial() const {
-        return render_pass_serial;
-    }
-
-    /// The graphics pipeline bound in the current command buffer, if the scheduler knows it.
-    const GraphicsPipeline* BoundGraphicsPipeline() const {
-        return state.graphics_pipeline;
-    }
-
     /// Update the pipeline to the current execution context.
     bool UpdateGraphicsPipeline(GraphicsPipeline* pipeline);
+
+    /// Worker thread only: whether the bound graphics pipeline failed to build, so the draws
+    /// recorded after it must be dropped instead of reaching the driver without a pipeline.
+    void SetGraphicsPipelineMissing(bool missing) {
+        graphics_pipeline_missing = missing;
+    }
+    [[nodiscard]] bool GraphicsPipelineMissing() const {
+        return graphics_pipeline_missing;
+    }
 
     /// Update the rescaling state. Returns true if the state has to be updated.
     bool UpdateRescaling(bool is_rescaling, bool mesh_layout);
@@ -218,6 +227,10 @@ public:
         return master_semaphore->CurrentTick();
     }
 
+    [[nodiscard]] u64 RecordingEpoch() const noexcept {
+        return recording_epoch;
+    }
+
     /// Returns true when a tick has been triggered by the GPU.
     [[nodiscard]] bool IsFree(u64 tick) const noexcept {
         return master_semaphore->IsFree(tick);
@@ -236,7 +249,6 @@ public:
             if (tick >= master_semaphore->CurrentTick()) {
                 Flush();
             }
-            VideoCommon::BackWaitScope wait_scope{"Scheduler::Wait (host GPU execution)"};
             master_semaphore->Wait(tick);
         }
         const auto trace_waited = trace ? std::chrono::steady_clock::now()
@@ -445,7 +457,6 @@ private:
     std::unique_ptr<MasterSemaphore> master_semaphore;
     bool fragment_barrier_pending{};
     bool render_pass_has_stores{};
-    u64 render_pass_serial{};
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;
@@ -500,6 +511,7 @@ private:
     std::function<void()> on_submit;
 
     State state;
+    u64 recording_epoch = 0;
 
     u32 num_renderpass_images = 0;
     std::array<VkImage, 9> renderpass_images{};
@@ -512,8 +524,6 @@ private:
     std::mutex queue_mutex;
     std::condition_variable_any event_cv;
     bool worker_waiting{}; ///< The worker is waiting for work (guarded by queue_mutex)
-    std::unique_ptr<ParallelRecord::SecondarySource> secondary_pools;
-    std::unique_ptr<ParallelRecord> parallel_record; ///< EDEN_NX2_PARALLEL_RECORD, worker only
     std::jthread worker_thread;
 
     std::chrono::steady_clock::duration frame_interval{};

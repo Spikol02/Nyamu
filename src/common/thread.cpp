@@ -13,7 +13,6 @@
 #include "common/error.h"
 #include "common/event_wait.h"
 #include "common/logging.h"
-#include "common/nx2_sample_profile.h"
 #include "common/assert.h"
 #include "common/thread.h"
 #ifdef __APPLE__
@@ -505,7 +504,6 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
 }
 
 void SetCurrentThreadName(const char* name) {
-    Nx2SampleProfile::OnThreadNamed(name);
 #ifdef _MSC_VER
     // Sets the debugger-visible name of the current thread.
     if (auto pf = (decltype(&SetThreadDescription))(void*)GetProcAddress(GetModuleHandle(TEXT("KernelBase.dll")), "SetThreadDescription"); pf)
@@ -732,20 +730,21 @@ __attribute__((target("waitpkg,mwaitx")))
 bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #ifdef _WIN32
     auto const& caps = Common::g_cpu_caps;
+    const auto deadline = EventWaitDeadline(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()), time);
+    const auto remaining = [deadline] {
+        return deadline - std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch());
+    };
+    const u64 ticks_per_second = Common::g_wall_clock.NsToTicks(std::chrono::seconds{1});
     if (caps.monitorx) {
-        const auto deadline = EventWaitDeadline(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()), time);
-        const u64 ticks_per_second = Common::g_wall_clock.NsToTicks(std::chrono::seconds{1});
         while (true) {
             // Armed monitor, as per manual, MWAITX must be conditional if the condition isn't satisfied
             // to prevent a race condition.
             _mm_monitorx(reinterpret_cast<u64*>(std::addressof(is_set)), 0, 0);
             if (!is_set.load()) {
-                const u32 cycles = MwaitxTimeoutCycles(
-                    deadline - std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                   std::chrono::steady_clock::now().time_since_epoch()),
-                    ticks_per_second);
+                const u32 cycles = MwaitxTimeoutCycles(remaining(), ticks_per_second);
                 if (cycles != 0) {
                     // See here: https://github.com/torvalds/linux/blob/948a64995aca6820abefd17f1a4258f5835c5ad9/arch/x86/lib/delay.c#L93
                     // MWAITX accepts a 32-bit input timer which determines the total number of cycles to wait for
@@ -762,13 +761,20 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
                 return true;
         }
     }
-    const u64 end = Common::X64::FencedRDTSC() + Common::g_wall_clock.NsToTicks(time);
     if (caps.waitpkg) {
         // #UD If CPUID.7.0:ECX.WAITPKG[bit 5]=0.
         while (true) {
             _umonitor(std::addressof(is_set));
-            if (!is_set.load() && !_umwait(0, end)) //umwait is absolute time!!!
-                return false;
+            if (!is_set.load()) {
+                // UMWAIT also wakes early on interrupts, and its result (CF) only reports the OS
+                // limit (IA32_UMWAIT_CONTROL). Wait again until the deadline, as for MWAITX. The
+                // bounded budget keeps the absolute TSC deadline from wrapping.
+                const u32 cycles = MwaitxTimeoutCycles(remaining(), ticks_per_second);
+                if (cycles == 0)
+                    return false; // timeout
+                _umwait(0, Common::X64::FencedRDTSC() + cycles); // umwait is absolute time!!!
+                continue;
+            }
             bool expected = true;
             if (is_set.compare_exchange_weak(expected, false, std::memory_order_release))
                 return true;

@@ -134,8 +134,7 @@ public:
         , kernelbase_dll("Kernelbase")
     {}
 
-    bool Init(bool defer_commit) {
-        deferred_commit = defer_commit;
+    bool Init() {
         if (!kernelbase_dll.IsOpen()) {
             LOG_CRITICAL(HW_Memory, "Failed to load Kernelbase.dll");
             return false;
@@ -151,9 +150,7 @@ public:
         }
 
         // Allocate backing file map
-        // Deferred: reserve only, and commit each granule the kernel first hands out (MarkUsed).
-        // Committing the whole 12 GB layout plus the graphics pool at once failed on 16 GB PCs.
-        backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, deferred_commit ? SEC_RESERVE : SEC_COMMIT, backing_size, nullptr, nullptr, 0);
+        backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_COMMIT, backing_size, nullptr, nullptr, 0);
         if (!backing_handle) {
             LOG_CRITICAL(HW_Memory, "Failed to allocate {} MiB of backing memory", backing_size >> 20);
             return false;
@@ -192,32 +189,6 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to allocate fallback buffer with size {:#x}, error {}", size, GetLastError());
         }
         return ptr;
-    }
-
-    void Commit(size_t physical_offset, size_t length) {
-        if (!deferred_commit) {
-            return;
-        }
-        // A system-managed pagefile grows only once a commit has failed, and not at once: retry
-        // for up to 10 s while Windows grows it rather than end the process.
-        constexpr int Attempts = 200;
-        for (int attempt = 0;; ++attempt) {
-            if (VirtualAlloc(backing_base + physical_offset, length, MEM_COMMIT, PAGE_READWRITE)) {
-                if (attempt != 0) {
-                    LOG_WARNING(HW_Memory, "Committed {:#x} bytes after {} ms of retries (host "
-                                           "commit limit reached)",
-                                length, attempt * 50);
-                }
-                return;
-            }
-            if (attempt + 1 == Attempts) {
-                LOG_CRITICAL(HW_Memory, "Could not commit {:#x} bytes of guest memory, error {}: "
-                                        "the host is out of RAM and pagefile",
-                             length, GetLastError());
-                throw std::bad_alloc{};
-            }
-            Sleep(50);
-        }
     }
 
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
@@ -433,7 +404,6 @@ private:
     std::mutex placeholder_mutex;                                 ///< Mutex for placeholders
     boost::icl::separate_interval_set<size_t> placeholders;       ///< Mapped placeholders
     ::Common::unordered_map<size_t, size_t> placeholder_host_pointers; ///< Placeholder backing offset
-    bool deferred_commit{}; ///< Backing reserved only; granules committed as they are used
 };
 
 #elif defined(__OPENORBIS__) || defined(__managarm__)
@@ -560,7 +530,7 @@ public:
     }
 #endif
 
-    bool Init([[maybe_unused]] bool defer_commit) {
+    bool Init() {
         const long page_size = sysconf(_SC_PAGESIZE);
         if (page_size < static_cast<long>(PageAlignment) ||
             page_size % static_cast<long>(PageAlignment) != 0) {
@@ -934,8 +904,7 @@ private:
 
 #endif // ^^^ POSIX ^^^
 
-HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_,
-                       [[maybe_unused]] BackingMode backing_mode)
+HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_)
     : backing_size(backing_size_)
     , virtual_size(virtual_size_)
     , num_granules(Common::DivCeil(backing_size_, size_t{1} << GranuleShift))
@@ -948,7 +917,7 @@ HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_,
 #else
     // Try to allocate a fastmem arena.
     impl = std::make_unique<HostMemory::Impl>(AlignUp(backing_size, PageAlignment), AlignUp(virtual_size, PageAlignment) + HugePageSize);
-    if (impl->Init(backing_mode == BackingMode::Deferred)) {
+    if (impl->Init()) {
         backing_base = impl->backing_base;
         virtual_base = impl->virtual_base;
         if (virtual_base) {
@@ -1091,27 +1060,10 @@ void HostMemory::MarkUsed(size_t physical_offset, size_t length) {
     if (length == 0) {
         return;
     }
-    ASSERT(physical_offset <= backing_size && length <= backing_size - physical_offset);
     const size_t last = (physical_offset + length - 1) >> GranuleShift;
-    for (size_t index = physical_offset >> GranuleShift; index <= last;) {
-        if ((granules[index].load(std::memory_order_acquire) & GranuleUsed) != 0) {
-            ++index;
-            continue;
-        }
-        // Commit each run of granules not used before in one call (deferred backing).
-        const size_t first = index++;
-        while (index <= last &&
-               (granules[index].load(std::memory_order_acquire) & GranuleUsed) == 0) {
-            ++index;
-        }
-#ifdef _WIN32
-        if (impl) {
-            const size_t start = first << GranuleShift;
-            impl->Commit(start, (std::min)(backing_size, index << GranuleShift) - start);
-        }
-#endif
-        for (size_t current = first; current < index; ++current) {
-            granules[current].fetch_or(GranuleUsed, std::memory_order_release);
+    for (size_t index = physical_offset >> GranuleShift; index <= last; ++index) {
+        if ((granules[index].load(std::memory_order_relaxed) & GranuleUsed) == 0) {
+            granules[index].fetch_or(GranuleUsed, std::memory_order_release);
         }
     }
 }

@@ -491,39 +491,6 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     default:
         break;
     }
-    // EDEN_CPU_GLOBAL_MONITOR=1: keep exclusive accesses checked across cores (Auto and Unsafe
-    // ignore the global monitor; lock-free hand-offs between the guest's threads can then pass
-    // when they should fail). EDEN_CPU_FUSED_FMA=1: keep multiply-adds fused.
-    static const bool keep_global_monitor = [] {
-        const char* value = std::getenv("EDEN_CPU_GLOBAL_MONITOR");
-        return value != nullptr && value[0] == '1';
-    }();
-    static const bool keep_fused_fma = [] {
-        const char* value = std::getenv("EDEN_CPU_FUSED_FMA");
-        return value != nullptr && value[0] == '1';
-    }();
-    if (keep_global_monitor) {
-        config.optimizations &= ~Dynarmic::OptimizationFlag::Unsafe_IgnoreGlobalMonitor;
-    }
-    if (keep_fused_fma) {
-        config.optimizations &= ~Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA;
-    }
-    // EDEN_CPU_ACCURATE_FLOAT=1: NaNs and float precision as Accurate does (Unsafe's inaccurate
-    // NaN and reduced-error FP off). EDEN_CPU_FASTMEM_CHECK=1: keep the fastmem bounds check.
-    const auto flag = [](const char* name) {
-        const char* const value = std::getenv(name);
-        return value != nullptr && value[0] == '1';
-    };
-    static const bool accurate_float = flag("EDEN_CPU_ACCURATE_FLOAT");
-    static const bool fastmem_check = flag("EDEN_CPU_FASTMEM_CHECK");
-    if (accurate_float) {
-        config.optimizations &= ~(Dynarmic::OptimizationFlag::Unsafe_InaccurateNaN |
-                                  Dynarmic::OptimizationFlag::Unsafe_ReducedErrorFP |
-                                  Dynarmic::OptimizationFlag::Unsafe_IgnoreStandardFPCRValue);
-    }
-    if (fastmem_check) {
-        config.fastmem_address_space_bits = std::uint32_t(address_space_bits);
-    }
     if (!Settings::IsFastmemEnabled()) {
         config.fastmem_pointer = std::nullopt;
         config.fastmem_exclusive_access = false;

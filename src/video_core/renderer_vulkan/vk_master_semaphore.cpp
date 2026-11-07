@@ -8,6 +8,7 @@
 
 #include <ranges>
 #include "common/settings.h"
+#include "video_core/renderer_vulkan/vk_gpu_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -83,13 +84,11 @@ void MasterSemaphore::Wait(u64 tick) {
             return;
         }
 
-        const auto start = std::chrono::steady_clock::now();
         u64 last_tick = gpu_tick.load(std::memory_order_relaxed);
         while (gpu_tick.load(std::memory_order_acquire) < tick) {
             gpu_tick.wait(last_tick, std::memory_order_acquire);
             last_tick = gpu_tick.load(std::memory_order_relaxed);
         }
-        ReportSlowWait(tick, start);
         return;
     }
 
@@ -106,28 +105,27 @@ void MasterSemaphore::Wait(u64 tick) {
     }
 
     // If none of the above is hit, fallback to a regular wait
-    const auto start = std::chrono::steady_clock::now();
     try {
-        while (!semaphore.Wait(tick)) {
+        // A healthy GPU passes any tick within a frame or two; after 2 s say what it was doing
+        // (a hang often ends in a driver reset that later surfaces as an unrelated failure).
+        bool reported = false;
+        while (!semaphore.Wait(tick,
+                               reported ? (std::numeric_limits<u64>::max)() : u64{2'000'000'000})) {
+            if (!reported) {
+                reported = true;
+                LOG_CRITICAL(Render_Vulkan, "GPU has not reached tick {} after 2 s (at {})", tick,
+                             semaphore.GetCounter());
+                GpuBreadcrumbs::Get().Dump("GPU wait over 2 s");
+            }
         }
     } catch (const vk::Exception& exception) {
         // The throw ends the process; say why first (a device loss reached nothing else here).
         LOG_CRITICAL(Render_Vulkan, "Waiting for GPU tick {} failed: {}", tick, exception.what());
+        GpuBreadcrumbs::Get().Dump("GPU wait failed");
         throw;
     }
-    ReportSlowWait(tick, start);
 
     Refresh();
-}
-
-void MasterSemaphore::ReportSlowWait(u64 tick, std::chrono::steady_clock::time_point start) {
-    // A wait this long is the GPU itself running slow or stuck (a hung shader shows here first,
-    // seconds before the driver reports the device lost).
-    const auto waited = std::chrono::steady_clock::now() - start;
-    if (waited >= std::chrono::milliseconds{500}) {
-        LOG_WARNING(Render_Vulkan, "Waited {} ms for the GPU to finish tick {}",
-                    std::chrono::duration_cast<std::chrono::milliseconds>(waited).count(), tick);
-    }
 }
 
 VkResult MasterSemaphore::SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,

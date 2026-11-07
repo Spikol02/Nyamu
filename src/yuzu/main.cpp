@@ -32,9 +32,6 @@
 #endif
 
 #include "main_window.h"
-#include "video_core/nx2_cmdpage_diag.h"
-#include "video_core/nx2_draw_runs.h"
-#include "video_core/nx2_fast_draw.h"
 
 #ifdef _WIN32
 #include <QScreen>
@@ -166,10 +163,6 @@ static void LoadNx2Switches(const char* argv0) {
 
 int main(int argc, char* argv[]) {
     LoadNx2Switches(argv[0]);
-    // Switches read at static initialisation, before the file above reached the environment.
-    VideoCommon::Nx2FastDraw::ReloadFromEnvironment();
-    VideoCommon::Nx2DrawRuns::ReloadFromEnvironment();
-    Tegra::Nx2CmdPageDiag::ReloadFromEnvironment();
 #if YUZU_ROOM
     bool launch_room = false;
     for (int i = 1; i < argc; i++) {

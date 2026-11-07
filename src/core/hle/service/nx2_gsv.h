@@ -60,7 +60,6 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/nx2_video_decoder.h"
 #include "video_core/nx2.h"
-#include "video_core/nx2_frame_skip.h"
 #include "video_core/textures/decoders.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -1756,11 +1755,16 @@ private:
             const char* value = std::getenv("EDEN_NX2_FRAMES_AHEAD");
             return value == nullptr ? -1 : value[0] == '1' ? 1 : 0;
         }();
-        // 999sian (bd2b421059): Ocarina of Time presents one frame ahead unless EDEN_NX2_FRAMES_AHEAD
-        // says otherwise (the present no longer waits ~12 ms on this frame's fence).
+        // Donkey Kong Bananza's channels wait on each other every frame, so it always ran a frame
+        // ahead, where it rewrote memory the GPU thread hadn't read yet (misread commands, then
+        // a freeze or crash; rubberbanding while moving). Title 1 runs ahead without either.
+        constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
         constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
         int frames_ahead = frames_ahead_setting;
-        if (frames_ahead == -1 && system.GetApplicationProcessProgramID() == OcarinaOfTimeProgramId) {
+        const u64 app_program_id = system.GetApplicationProcessProgramID();
+        if (frames_ahead == -1 && app_program_id == DonkeyKongBananzaProgramId) {
+            frames_ahead = 0;
+        } else if (frames_ahead == -1 && app_program_id == OcarinaOfTimeProgramId) {
             frames_ahead = 1;
         }
         const auto entered = std::chrono::steady_clock::now();
@@ -1783,7 +1787,7 @@ private:
         const auto waited = std::chrono::steady_clock::now();
         Composite(w[5], ~w[22], w[24], w[7]);
         const auto composited = std::chrono::steady_clock::now();
-        PaceToVblank(w[12]);
+        PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess());
         const auto paced = std::chrono::steady_clock::now();
         if (Common::DkbFrameTrace::Enabled()) {
             const auto ms = [](auto duration) {
@@ -1824,13 +1828,13 @@ private:
             m_stats.composite_us += to_us(composited - waited);
             m_stats.pace_us += to_us(paced - composited);
             m_stats.max_fence_us = (std::max<long long>)(m_stats.max_fence_us, static_cast<long long>(to_us(waited - entered)));
+            // Counted at the reply: the game gets its buffers back with this frame unfinished.
+            if (const u32 fence_id = ~w[22]; fence_id < 192 &&
+                !system.Host1x().GetSyncpointManager().IsReadyGuest(fence_id, w[24])) {
+                ++m_stats.ran_ahead;
+            }
             if (m_stats.last_present != std::chrono::steady_clock::time_point{}) {
                 const long long frame = to_us(entered - m_stats.last_present);
-                // Frame skip (video_core/nx2_frame_skip.h): was this frame later than the swap
-                // interval the game holds (as PaceToVblank honours it)?
-                VideoCommon::Nx2FrameSkip::NotePresent(
-                    static_cast<double>(frame) / 1000.0,
-                    m_swap_stable >= 120 ? std::clamp<u32>(m_swap_word >> 16, 1, 4) : 1U);
                 m_stats.frame_us += frame;
                 m_stats.max_frame_us = (std::max)(m_stats.max_frame_us, frame);
                 m_stats.hitches += frame > 100'000 ? 1 : 0;
@@ -1840,10 +1844,10 @@ private:
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
-                         "pacing {} us",
+                         "pacing {} us, {} ran a frame ahead",
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
-                         m_stats.pace_us / 600);
+                         m_stats.pace_us / 600, m_stats.ran_ahead);
                 m_stats = {.last_present = entered};
             }
         }
@@ -1862,7 +1866,7 @@ private:
     struct PresentStats {
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
         long long max_frame_us{}, hitches{};
-        u32 presents{};
+        u32 presents{}, ran_ahead{};
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
@@ -1873,7 +1877,6 @@ private:
     // next vblank instead (title 4 ran at up to 160 fps, its timing and audio with it).
     Nx2PresentPacer m_present_pacer;
     u32 m_swap_word{};
-    u32 m_swap_stable{}; ///< Presents since the swap word last changed (capped)
 
     struct FrameTrace {
         Common::DkbFrameTrace::RateLimit rate;
@@ -1888,7 +1891,7 @@ private:
     // timing: present word 12, (swap interval << 16) | refresh rate. Fire Emblem: Fortune's Weave
     // sends 0x1003c during its boot logos and 0x2003c (two vblanks per frame, 30 fps) after; paced
     // at every vblank it ran at double speed. EDEN_NX2_SWAP_INTERVAL=<n> forces the interval.
-    void PaceToVblank(u32 timing) {
+    void PaceToVblank(u32 timing, const Kernel::KProcess* process) {
         const bool trace = Common::DkbFrameTrace::Enabled();
         if (trace) {
             if (m_frame_trace.previous_word && *m_frame_trace.previous_word != timing) {
@@ -1906,31 +1909,10 @@ private:
             const char* value = std::getenv("EDEN_NX2_SWAP_INTERVAL");
             return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
         }();
-        const auto& process = Kernel::GetCurrentProcess(kernel);
         const bool mkw_dynamic =
-            process.GetProgramId() == Settings::MarioKartWorldProgramId &&
-            process.IsMkwDynamicFpsPatchApplied() && Settings::values.mkw_dynamic_fps.GetValue();
-        // Mario Kart World flips between intervals 1 and 2 every few frames (its own frame timing
-        // on a VRR display): held to two vblanks on each 2, it fell from ~40 to 20-30 fps. Honour
-        // an interval above 1 only once the game has kept it for StableSwapPresents presents.
-        constexpr u32 StableSwapPresents = 120;
-        u32 swap_interval = timing == m_swap_word && m_swap_stable >= StableSwapPresents
-                                ? std::clamp<u32>(timing >> 16, 1, 4)
-                                : 1;
-        // Donkey Kong Bananza also flips between intervals 1 and 2 (several times a second), but
-        // advances its game time by the interval it asked for: paced at one vblank on its 2s, it
-        // ran fast, and slow on 1s the host missed, so game speed rose and fell. Give each frame
-        // the vblanks it asked for, so game time follows real time. EDEN_NX2_SWAP_FOLLOW=1 does
-        // this for every title, =0 for none.
-        static const int follow_env = [] {
-            const char* value = std::getenv("EDEN_NX2_SWAP_FOLLOW");
-            return value == nullptr ? -1 : (value[0] == '1' ? 1 : 0);
-        }();
-        const bool follow = follow_env == 1 ||
-                            (follow_env == -1 && process.GetProgramId() == Settings::DonkeyKongBananzaProgramId);
-        if (follow) {
-            swap_interval = std::clamp<u32>(timing >> 16, 1, 4);
-        }
+            process != nullptr && process->GetProgramId() == Settings::MarioKartWorldProgramId &&
+            process->IsMkwDynamicFpsPatchApplied() && Settings::values.mkw_dynamic_fps.GetValue();
+        u32 swap_interval = std::clamp<u32>(timing >> 16, 1, 4);
         if (mkw_dynamic) {
             swap_interval = 1;
         }
@@ -1947,22 +1929,11 @@ private:
             return;
         }
         if (timing != std::exchange(m_swap_word, timing)) {
-            m_swap_stable = 0;
             LOG_INFO(Service, "nx2:vi2 present #{} swap interval {} at {} Hz (word 12 = {:#x})",
                      m_presents, swap_interval, refresh_rate, timing);
-        } else if (m_swap_stable < StableSwapPresents) {
-            ++m_swap_stable;
         }
-        // EDEN_NX2_PRESENT_HZ=<rate> (the 30FPS PATCH): hold presents to this rate instead.
-        static const long long present_hz = [] {
-            const char* text = std::getenv("EDEN_NX2_PRESENT_HZ");
-            return text ? (std::max)(std::strtoll(text, nullptr, 10), 1LL) : 0LL;
-        }();
-        const auto interval =
-            present_hz != 0
-                ? std::chrono::nanoseconds{100'000'000'000LL / present_hz / Settings::SpeedLimit()}
-                : std::chrono::nanoseconds{100'000'000'000LL * swap_interval / refresh_rate /
-                                           Settings::SpeedLimit()};
+        const auto interval = std::chrono::nanoseconds{
+            100'000'000'000LL * swap_interval / refresh_rate / Settings::SpeedLimit()};
         if (trace) {
             m_frame_trace.target_ms = std::chrono::duration<double, std::milli>(interval).count();
         }

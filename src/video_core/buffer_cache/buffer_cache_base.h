@@ -15,9 +15,7 @@
 #include <mutex>
 #include <numeric>
 #include <optional>
-#include <set>
 #include <span>
-#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -37,6 +35,7 @@
 #include "common/slot_vector.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/read_trap_tracker.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
@@ -69,23 +68,6 @@ constexpr u32 NUM_STORAGE_BUFFERS = Shader::Info::MAX_SSBOS;
 static_assert(NUM_STORAGE_BUFFERS <= 32, "storage binding masks must fit u32");
 constexpr u32 NUM_TEXTURE_BUFFERS = 32;
 constexpr u32 NUM_STAGES = 5;
-
-/// End of the writes a run-time selected global access can make through the buffer at base: the
-/// backend assigns an address to the closest base at or below it, so writes through this buffer
-/// stop before the next higher base. Bases are aligned down by up to alignment bytes where the
-/// shader reads them, so a base may lie that much past the one bound. Returns size when no
-/// other base is higher.
-[[nodiscard]] inline u64 SelectedWriteExtent(GPUVAddr base, u64 size,
-                                             std::span<const GPUVAddr> other_bases,
-                                             u64 alignment) {
-    u64 extent = size;
-    for (const GPUVAddr other : other_bases) {
-        if (other > base) {
-            extent = (std::min)(extent, other - base + alignment);
-        }
-    }
-    return extent;
-}
 
 static_assert(NUM_GRAPHICS_UNIFORM_BUFFERS <= 32, "fast bitmask must fit u32");
 
@@ -173,12 +155,6 @@ public:
     std::array<u32, NUM_STAGES> written_storage_buffers{};
     u32 enabled_compute_storage_buffers = 0;
     u32 written_compute_storage_buffers = 0;
-    /// Written only by run-time selected global accesses (see SelectedWriteExtent).
-    std::array<u32, NUM_STAGES> selected_write_storage_buffers{};
-    u32 selected_write_compute_storage_buffers = 0;
-    /// Bound from a pointer table entry.
-    std::array<u32, NUM_STAGES> table_storage_buffers{};
-    u32 table_compute_storage_buffers = 0;
 
     u32 total_graphics_storage_buffers = 0;
     u32 total_compute_storage_buffers = 0;
@@ -205,7 +181,6 @@ public:
 
 template <class P>
 class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInfo> {
-    friend struct BufferCacheTestAccess;
     // Page size for caching purposes.
     // This is unrelated to the CPU page size and it can be changed as it seems optimal.
 #ifdef YUZU_LEGACY
@@ -283,9 +258,6 @@ public:
 
     void DownloadMemory(DAddr device_addr, u64 size);
 
-    /// DownloadMemory for each range, waiting for the GPU once.
-    void DownloadMemoryRanges(std::span<const std::pair<DAddr, u64>> ranges);
-
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 
     /// Without downloads at every fence, a guest CPU read is the only way GPU-written buffer
@@ -318,8 +290,7 @@ public:
     void UnbindGraphicsStorageBuffers(size_t stage);
 
     bool BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                   bool is_written, u32 indirect_offset = ~0U,
-                                   bool selected_writes = false);
+                                   bool is_written, u32 indirect_offset = ~0U);
 
     void UnbindGraphicsTextureBuffers(size_t stage);
 
@@ -329,8 +300,7 @@ public:
     void UnbindComputeStorageBuffers();
 
     void BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                  bool is_written, u32 indirect_offset = ~0U,
-                                  bool selected_writes = false);
+                                  bool is_written, u32 indirect_offset = ~0U);
 
     void UnbindComputeTextureBuffers();
 
@@ -386,16 +356,63 @@ public:
     Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
-    /// The split's back, the front waiting on it: downloads `pages` and every page draws wrote
-    /// since it was last flushed with one GPU wait, and notes the latter synced. Each page's next
-    /// lists then read guest memory instead of draining and flushing one page at a time.
-    void Nx2FlushListPages(std::span<const DAddr> pages);
     /// CPU and inline writes: they reach guest memory, so a synced page stays synced, but its copy
     /// no longer holds the page.
     void Nx2NoteListHostWrite(DAddr device_addr, u64 size);
 
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, size_t size);
+
+    /// Visits the uniform and storage buffers bound for the last draw or dispatch with the cached
+    /// host buffer holding each range, if one does, for diagnostics. Nothing is
+    /// created or synchronized. Stage 5 is compute.
+    template <typename Func>
+    void ForEachBoundBuffer(bool compute, Func&& func) {
+        const auto visit = [&](u32 stage, bool storage, u32 index, bool written,
+                               const Binding& binding, u32 size) {
+            if (binding.device_addr == 0 || size == 0) {
+                return;
+            }
+            const Buffer* host = nullptr;
+            u32 offset = 0;
+            if (const BufferId id = page_table[binding.device_addr >> CACHING_PAGEBITS]) {
+                const Buffer& buffer = slot_buffers[id];
+                if (buffer.IsInBounds(binding.device_addr, size)) {
+                    host = &buffer;
+                    offset = buffer.Offset(binding.device_addr);
+                }
+            }
+            func(stage, storage, index, written, binding, size, host, offset);
+        };
+        if (compute) {
+            const auto* const sizes = channel_state->compute_uniform_buffer_sizes;
+            ForEachEnabledBit(channel_state->enabled_compute_uniform_buffer_mask, [&](u32 index) {
+                const Binding& binding = channel_state->compute_uniform_buffers[index];
+                visit(5, false, index, false, binding,
+                      sizes ? std::min(binding.size, (*sizes)[index]) : binding.size);
+            });
+            ForEachEnabledBit(channel_state->enabled_compute_storage_buffers, [&](u32 index) {
+                const Binding& binding = channel_state->compute_storage_buffers[index];
+                visit(5, true, index, ((channel_state->written_compute_storage_buffers >> index) & 1) != 0,
+                      binding, binding.size);
+            });
+            return;
+        }
+        const auto* const sizes = channel_state->uniform_buffer_sizes;
+        for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
+            ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
+                const Binding& binding = channel_state->uniform_buffers[stage][index];
+                visit(stage, false, index, false, binding,
+                      sizes ? std::min(binding.size, (*sizes)[stage][index]) : binding.size);
+            });
+            ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
+                const Binding& binding = channel_state->storage_buffers[stage][index];
+                visit(stage, true, index,
+                      ((channel_state->written_storage_buffers[stage] >> index) & 1) != 0, binding,
+                      binding.size);
+            });
+        }
+    }
 
     /// Return true when a region is registered on the cache
     [[nodiscard]] bool IsRegionRegistered(DAddr addr, size_t size);
@@ -411,18 +428,6 @@ public:
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectCount();
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
-
-    /// EDEN_NX2_FAST_DRAW: updates and binds only the index buffer for a reused indexed draw.
-    /// False when that created or deleted buffers, so the draw needs a full resolve.
-    [[nodiscard]] bool RebindIndexBuffer();
-    /// Updates and binds the vertex buffers whose registers changed; false when that created or
-    /// deleted buffers.
-    [[nodiscard]] bool RebindVertexBuffers();
-    /// Resolves the graphics uniform, storage and texture buffers bound since the last draw;
-    /// false when that created or deleted buffers.
-    [[nodiscard]] bool UpdateGraphicsStageBuffers();
-    /// EDEN_NX2_FAST_DRAW_VERIFY: a hash of the bindings a reused or delta draw keeps.
-    [[nodiscard]] u64 KeptGraphicsBindingsHash(bool vertex, bool storage, bool texture) const;
 
     template <typename Func>
     void BufferOperations(Func&& func) {
@@ -568,11 +573,17 @@ private:
     /// Downloads the GPU-written data of several buffers with one wait for the GPU.
     void DownloadBuffersMemory(std::span<const BufferId> buffer_ids);
 
+    void DownloadRangesMemory(std::span<const std::pair<DAddr, u64>> ranges);
+
     void DeleteBuffer(BufferId buffer_id, bool do_not_mark = false);
 
     [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index, bool is_written,
                                                bool native_pointer = false,
                                                bool table_pointer = false) const;
+
+    void TraceTablePointer(bool compute, size_t stage, size_t ssbo_index, u32 cbuf_index,
+                           u32 cbuf_offset, u32 indirect_offset, GPUVAddr holder,
+                           const Binding& binding);
 
     [[nodiscard]] TextureBufferBinding GetTextureBufferBinding(GPUVAddr gpu_addr, u32 size,
                                                                PixelFormat format);
@@ -618,27 +629,6 @@ private:
     u64 vertex_buffers_serial = 0;
     std::array<Binding, 32> v_buffer{};
 
-    /// EDEN_NX2_BUFFER_SKIP: the inputs and result of each vertex stream's last lookup.
-    struct VertexLookup {
-        GPUVAddr begin{};
-        GPUVAddr end{};
-        const void* owner{};
-        u64 map_serial{};
-        u64 deletions{};
-        Binding binding{};
-        bool valid{};
-    };
-    std::array<VertexLookup, NUM_VERTEX_BUFFERS> vertex_lookups{};
-    u64 buffer_deletions = 0;
-    struct SkipStats {
-        u64 window_start{};
-        u64 lookups{};
-        u64 lookups_kept{};
-        u64 syncs{};
-        u64 syncs_skipped{};
-        u64 verify_mismatches{};
-    } skip_stats;
-
     boost::container::small_vector<BufferCopy, 4> upload_copies;
 
     MemoryTracker memory_tracker;
@@ -661,26 +651,6 @@ private:
         }
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling();
     }
-
-    /// Experiment, EDEN_NX2_WRITTEN_SSBO_MARK_KIB=<n>: marks at most n KiB of a written Switch 2
-    /// storage buffer binding GPU-written. Native pointers carry no size, so a written binding
-    /// spans up to 8 MiB of its mapping and arms read traps and fence downloads over CPU data
-    /// the shader never writes. Writes past the cap are not tracked, so this only measures how
-    /// much of the marked range the GPU really writes.
-    u32 WrittenStorageMarkSize(u32 size) const {
-        static const u64 cap = [] {
-            const char* value = std::getenv("EDEN_NX2_WRITTEN_SSBO_MARK_KIB");
-            return value == nullptr ? u64{0} : std::strtoull(value, nullptr, 10) * 1024;
-        }();
-        if (cap == 0 || gpu_memory == nullptr || !gpu_memory->UsesNativeTiling()) {
-            return size;
-        }
-        return static_cast<u32>((std::min<u64>)(size, cap));
-    }
-
-    /// Experiment, EDEN_NX2_SELECTED_WRITE_BOUND=1: the GPU-written mark of a written storage
-    /// binding, bounded for bindings only written by run-time selected global accesses.
-    u32 WrittenMarkSize(bool compute, size_t stage, u32 index, const Binding& binding);
 
     /// Whether a GPU write to this range is copied back at the next fence. Ranges the guest CPU
     /// has read (Preflushable, set by the first reactive flush) always are: later reads skip the
@@ -725,22 +695,21 @@ private:
     }
 
     /// GPU writes that are not downloaded at fences: trap the guest CPU's next read of their
-    /// pages, which flushes them once and marks them Preflushable (then DownloadsAtFence).
+    /// pages, which flushes them on demand (or marks them Preflushable with preflushing enabled).
     void ArmReadTraps(DAddr device_addr, u64 size) {
         const DAddr begin = Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE);
         const DAddr end = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
-        u64 armed_bytes = 0;
-        read_trapped_ranges.ForEachInRange(begin, end - begin, [&](DAddr lower, DAddr upper) {
-            armed_bytes += upper - lower;
-        });
-        if (armed_bytes == end - begin) {
+        if (!read_trapped_ranges.Arm(begin, end - begin)) {
             return;
         }
-        read_trapped_ranges.Add(begin, end - begin);
         device_memory.ArmReadTraps(begin, end - begin);
     }
 
-    Common::RangeSet<DAddr> read_trapped_ranges;
+    ReadTrapTracker read_trapped_ranges;
+    /// Ranges the guest CPU read after GPU writes. A read that must flush downloads the GPU
+    /// writes in all of them, so the reads that usually follow it find nothing left to flush.
+    Common::RangeSet<DAddr> cpu_read_ranges;
+    bool download_cpu_read_ranges{};
     Common::RangeSet<DAddr> gpu_modified_ranges;
     std::deque<Common::RangeSet<DAddr>> committed_gpu_modified_ranges;
 
@@ -770,8 +739,6 @@ private:
     std::vector<MultiRangeSegment> graphics_segments;
     std::vector<MultiRangeSegment> compute_segments;
     u64 frame_tick = 0;
-    /// EDEN_NX2_SELECTED_WRITE_BOUND: bounds already logged.
-    std::set<std::tuple<bool, size_t, u32, GPUVAddr, u32, u64>> logged_write_bounds;
     /// EDEN_NX2_TABLE_POINTER_TRACE: last table entry and size bound per table pointer slot.
     std::unordered_map<u64, std::pair<GPUVAddr, u32>> traced_table_pointers;
     u64 total_used_memory = 0;

@@ -12,7 +12,14 @@
 #include <type_traits>
 
 #include "common/common_types.h"
-#include "video_core/engines/engine_interface.h"
+
+namespace Core {
+class System;
+}
+
+namespace Tegra::Engines {
+class EngineInterface;
+}
 
 namespace VideoCommon {
 
@@ -32,14 +39,13 @@ enum class DrainSite : u32 {
     Map,            ///< GPU memory maps before later command reads
     FrontStart,     ///< The front takes an engine's macros over
     FrontVerify,    ///< EDEN_NX2_FRONT_VERIFY
-    MacroDmaCheck,  ///< EDEN_NX2_CMDPAGE_DIAG: a macro's memory read repeated after a full drain
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
     "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
-    "gp sync fence", "map",           "front start", "front verify",  "macro dma check",
+    "gp sync fence", "map",           "front start", "front verify",
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -105,9 +111,6 @@ public:
             entry[1] = *segment;
         }
         Commit(words);
-        if (engine->memory_write_mask[method]) {
-            NoteMaskedWrite(engine, method);
-        }
     }
     void MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, const u32* words,
                      u32 amount, u32 methods_pending, const GPUVAddr* segment);
@@ -118,47 +121,15 @@ public:
         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
                    (u64{argument} << 32);
         Commit(1);
-        if (engine->memory_write_mask[method]) {
-            NoteMaskedWrite(engine, method);
-        }
     }
-
-    /// EDEN_NX2_DMA_RANGES=1: the memory the next memory-writing method sent writes, in GPU
-    /// addresses (constant buffer and inline uploads, reports). Macro memory reads then wait for
-    /// those methods only when they overlap what the read covers.
-    void SetNextWriteRange(GPUVAddr begin, GPUVAddr end) {
-        next_range_begin = begin;
-        next_range_end = end;
-        next_write_kind = NextWrite::Range;
-    }
-    /// The next memory-writing method makes earlier draws' writes visible (wait for idle, sync
-    /// info) without writing memory itself.
-    void SetNextWriteVisibility() {
-        next_write_kind = NextWrite::Visibility;
-    }
-    [[nodiscard]] static bool RangesEnabled() {
-        return ranges_enabled;
-    }
-    /// Re-reads EDEN_NX2_DMA_RANGES and EDEN_NX2_LIST_TRUST (nx2_switches.txt loads after
-    /// static initialisation).
-    static void ReloadFromEnvironment();
-    /// EDEN_NX2_LIST_TRUST=1: command list entries on pages already seen to be CPU-written (no
-    /// compute or copy queued could have written them) don't wait for queued writers again.
-    [[nodiscard]] static bool ListTrustEnabled() {
-        return list_trust_enabled;
-    }
-
-    /// Defer flag: the call doesn't end EDEN_NX2_FAST_DRAW reuse (nx2_fast_draw.h).
-    static constexpr u64 FastDrawNeutral = 1 << 7;
 
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
-    /// `flags`: FastDrawNeutral when `func` can't change what a draw resolves to.
     template <typename Func>
-    void Defer(const Func& func, u64 flags = 0) {
+    void Defer(const Func& func) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
         u64* const entry = Reserve(2 + payload);
-        entry[0] = static_cast<u64>(Kind::Call) | flags | (u64{payload} << 8);
+        entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
         Commit(2 + payload);
@@ -204,88 +175,20 @@ public:
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
     bool WaitForSync();
-    /// Deferred work that can write memory was just sent (puller semaphore releases, maps).
-    void NoteMemoryWrite() {
-        last_memory_write_position = write_position;
-        last_untracked_write_position = write_position;
-    }
-    /// Deferred work that writes [begin, end) only (puller semaphore releases; payloads are
-    /// written at once while the split runs).
-    void NoteMemoryWriteRange(GPUVAddr begin, GPUVAddr end) {
-        last_memory_write_position = write_position;
-        if (ranges_enabled) {
-            RecordRange(begin, end);
-        } else {
-            last_untracked_write_position = write_position;
-        }
-    }
-    /// EDEN_NX2_PIN_FRONT / EDEN_NX2_PIN_BACK=<logical CPU>: pins the calling thread there (the GPU
-    /// thread and the split's back on separate physical cores, Windows only). `variable` names
-    /// the environment variable to read.
-    static void PinCurrentThread(const char* variable);
 
-    /// EDEN_NX2_ACQUIRE_QUEUED: a semaphore release with its payload, sent to the back.
-    void NoteQueuedRelease(GPUVAddr address, u32 payload) {
-        QueuedRelease& slot = queued_releases[queued_release_head];
-        slot = {address, payload, write_position};
-        queued_release_head = (queued_release_head + 1) % queued_releases.size();
-    }
-    /// Whether a release still queued for the back writes `address` with a payload that `meets`
-    /// accepts: the back runs it before anything sent later, so an acquire of it needn't drain.
-    template <typename Meets>
-    [[nodiscard]] bool QueuedReleaseMeets(GPUVAddr address, Meets&& meets) {
-        consumed_cache = consumed.load(std::memory_order_acquire);
-        // The newest release to the address decides (a later one can overwrite an earlier).
-        u64 best_position = 0;
-        bool found = false;
-        bool met = false;
-        for (const QueuedRelease& release : queued_releases) {
-            if (release.address == address && release.position > consumed_cache &&
-                release.position >= best_position) {
-                best_position = release.position;
-                found = true;
-                met = meets(release.payload);
-            }
-        }
-        return found && met;
-    }
-    /// Deferred work that writes no memory itself but orders earlier GPU work (syncpoint
-    /// increments, reference counts, cache invalidations).
-    void NoteVisibilityPoint() {
-        last_memory_write_position = write_position;
-        if (ranges_enabled) {
-            last_visibility_position = write_position;
-        } else {
-            last_untracked_write_position = write_position;
-        }
-    }
-    /// For the front's macro memory reads (MME DMA): waits until the back executed the methods
-    /// that write memory in command order (memory_write_mask, NoteMemoryWrite), the compute and
-    /// copy work and the work before the last host-level wait, all sent so far.
-    bool WaitForMemoryWriters(DrainSite site);
-    /// EDEN_NX2_DMA_RANGES: as WaitForMemoryWriters for a read of [begin, end), waiting only for
-    /// the range-tracked writes that overlap it, untracked memory writes, and, when `gpu_pages`
-    /// (the read touches pages the GPU wrote, or pages not yet seen clean), compute, copy and the
-    /// work before the last host-level wait or visibility point.
-    bool WaitForMemoryWritersIn(GPUVAddr begin, GPUVAddr end, bool gpu_pages, DrainSite site);
-
-    /// Counters for the EDEN_NX2_DMA_RANGES report (front thread).
-    struct RangeStats {
-        u64 reads{};
-        u64 waited{};
-        u64 old_would_wait{};
-        u64 by_range{};
-        u64 by_untracked{};
-        u64 by_gpu_pages{};
-        u64 trusted_list_entries{};
-    };
-    RangeStats range_stats;
-
-    static constexpr size_t SemSlot(u64 addr) noexcept {
-        return static_cast<size_t>(((addr >> 2) ^ (addr >> 10) ^ (addr >> 18)) & 63U);
+    /// Semaphore and report writes are tracked per 16-byte granule, tagged: an untagged 64-slot
+    /// hash made unrelated macro reads wait for the back (~250 ms a second in Ocarina).
+    static constexpr size_t SemSlot(u64 granule) noexcept {
+        return static_cast<size_t>((granule ^ (granule >> 10) ^ (granule >> 20)) & (SemSlots - 1));
     }
     void NoteSemaphoreWrite(u64 addr) noexcept {
-        sem_write_positions[SemSlot(addr)] = write_position;
+        const u64 granule = addr >> 4;
+        SemWrite& slot = sem_writes[SemSlot(granule)];
+        // Evicting a write the back has not run yet: later lookups can't see it, so wait for it.
+        if (slot.granule != granule && slot.position > consumed_cache) {
+            sem_evicted_position = std::max(sem_evicted_position, slot.position);
+        }
+        slot = {granule, write_position};
         last_release_position = write_position;
     }
     void NoteAnyRelease() noexcept {
@@ -294,61 +197,19 @@ public:
     [[nodiscard]] u64 LastReleasePosition() const noexcept {
         return last_release_position;
     }
-    bool WaitForSemaphore(u64 addr, DrainSite site = DrainSite::Acquire) {
-        return WaitFor(sem_write_positions[SemSlot(addr)], site);
-    }
-private:
-    struct QueuedRelease {
-        GPUVAddr address{};
-        u32 payload{};
-        u64 position{};
-    };
-    std::array<QueuedRelease, 64> queued_releases{};
-    size_t queued_release_head{};
-
-    enum class NextWrite : u8 { None, Range, Visibility };
-    struct RangeWrite {
-        GPUVAddr begin;
-        GPUVAddr end;
-        u64 position;
-    };
-    static constexpr size_t MaxRangeWrites = 128;
-
-    void NoteMaskedWrite(const Tegra::Engines::EngineInterface* engine, u32 method) {
-        last_memory_write_position = write_position;
-        if (!ranges_enabled) {
-            return;
-        }
-        switch (next_write_kind) {
-        case NextWrite::Range:
-            RecordRange(next_range_begin, next_range_end);
-            break;
-        case NextWrite::Visibility:
-            last_visibility_position = write_position;
-            break;
-        case NextWrite::None:
-            if (engine->writer_work_mask[method]) {
-                last_visibility_position = write_position;
-            } else {
-                last_untracked_write_position = write_position;
+    /// Waits for the queued semaphore and report writes to [addr, addr + size).
+    bool WaitForSemaphore(u64 addr, DrainSite site = DrainSite::Acquire, u64 size = 4) {
+        u64 target = sem_evicted_position;
+        for (u64 granule = addr >> 4; granule <= (addr + size - 1) >> 4; ++granule) {
+            const SemWrite& slot = sem_writes[SemSlot(granule)];
+            if (slot.granule == granule) {
+                target = std::max(target, slot.position);
             }
-            break;
         }
-        next_write_kind = NextWrite::None;
+        return WaitFor(std::min(target, write_position), site);
     }
-    void RecordRange(GPUVAddr begin, GPUVAddr end);
 
-    static inline bool ranges_enabled{};
-    static inline bool list_trust_enabled{};
-    std::array<RangeWrite, MaxRangeWrites> range_writes{};
-    size_t range_count{};
-    size_t range_head{};
-    GPUVAddr next_range_begin{};
-    GPUVAddr next_range_end{};
-    NextWrite next_write_kind{};
-    u64 last_untracked_write_position{};
-    u64 last_visibility_position{};
-
+private:
     enum class Kind : u64 {
         Wrap,   ///< The rest of the ring is unused: continue at its start
         Engine, ///< The engine the next methods go to: word 1
@@ -407,9 +268,14 @@ private:
     u64 write_position{};
     u64 last_writer_position{};
     u64 last_sync_position{};
-    u64 last_memory_write_position{};
     u64 last_release_position{};
-    std::array<u64, 64> sem_write_positions{};
+    static constexpr size_t SemSlots = 1024;
+    struct SemWrite {
+        u64 granule{~u64{0}};
+        u64 position{};
+    };
+    std::array<SemWrite, SemSlots> sem_writes{};
+    u64 sem_evicted_position{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.

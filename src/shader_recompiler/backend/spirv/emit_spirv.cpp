@@ -118,8 +118,44 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
     switch (type) {
     case IR::Type::U1:
         return ctx.U1;
+    case IR::Type::U8:
+        return ctx.U8;
+    case IR::Type::U16:
+        return ctx.U16;
     case IR::Type::U32:
         return ctx.U32[1];
+    case IR::Type::U64:
+        return ctx.U64;
+    case IR::Type::F16:
+        return ctx.F16[1];
+    case IR::Type::F32:
+        return ctx.F32[1];
+    case IR::Type::F64:
+        return ctx.F64[1];
+    case IR::Type::U32x2:
+        return ctx.U32[2];
+    case IR::Type::U32x3:
+        return ctx.U32[3];
+    case IR::Type::U32x4:
+        return ctx.U32[4];
+    case IR::Type::F16x2:
+        return ctx.F16[2];
+    case IR::Type::F16x3:
+        return ctx.F16[3];
+    case IR::Type::F16x4:
+        return ctx.F16[4];
+    case IR::Type::F32x2:
+        return ctx.F32[2];
+    case IR::Type::F32x3:
+        return ctx.F32[3];
+    case IR::Type::F32x4:
+        return ctx.F32[4];
+    case IR::Type::F64x2:
+        return ctx.F64[2];
+    case IR::Type::F64x3:
+        return ctx.F64[3];
+    case IR::Type::F64x4:
+        return ctx.F64[4];
     default:
         throw NotImplementedException("Phi node type {}", type);
     }
@@ -264,10 +300,7 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
         ctx.AddExecutionMode(main, spv::ExecutionMode::OutputVertices, program.mesh.max_vertices);
         ctx.AddExecutionMode(main, spv::ExecutionMode::OutputPrimitivesEXT,
                              program.mesh.max_primitives);
-        // SET_MESH_SHADER_A topology 0: points (Ocarina, after nxnative 6517f8b976); 4: triangles.
-        ctx.AddExecutionMode(main, program.mesh.topology == 0
-                                       ? spv::ExecutionMode::OutputPoints
-                                       : spv::ExecutionMode::OutputTrianglesEXT);
+        ctx.AddExecutionMode(main, spv::ExecutionMode::OutputTrianglesEXT);
         break;
     case Stage::TessellationControl:
         execution_model = spv::ExecutionModel::TessellationControl;
@@ -554,8 +587,7 @@ void RewriteOpcodes(std::vector<u32>& code, std::span<const std::pair<u32, spv::
             return;
         }
         if (opcode == spv::Op::OpGroupNonUniformShuffleXor ||
-            opcode == spv::Op::OpGroupNonUniformQuadBroadcast ||
-            opcode == static_cast<spv::Op>(5614) /* OpAtomicFMinEXT -> OpAtomicFAddEXT */) {
+            opcode == spv::Op::OpGroupNonUniformQuadBroadcast) {
             const auto it{std::ranges::find(rewrites, code[offset + 2],
                                             &std::pair<u32, spv::Op>::first)};
             if (it != rewrites.end()) {

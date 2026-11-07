@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <array>
 #include <memory>
 #include <stdexcept>
 #include "common/container/unordered_map.h"
 #include <tuple>
 #include <vector>
 #include <optional>
-#include <random>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "common/common_types.h"
+#include "common/range_sets.h"
+#include "video_core/buffer_cache/read_trap_tracker.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "core/device_memory.h"
 #include "core/memory.h"
@@ -569,6 +569,85 @@ TEST_CASE("MemoryTracker: Cached write downloads") {
     REQUIRE(rasterizer.Count() == 0);
 }
 
+TEST_CASE("MemoryTracker: overlapping readbacks clear each GPU page once", "[cpu_readback]") {
+    RasterizerInterface rasterizer;
+    MemoryTracker tracker{rasterizer};
+    tracker.UnmarkRegionAsCpuModified(c, PAGE * 4);
+    tracker.MarkRegionAsGpuModified(c, PAGE * 3);
+
+    std::vector<Range> downloads;
+    const auto collect = [&](u64 address, u64 size) { downloads.emplace_back(address, size); };
+    tracker.ForEachDownloadRangeAndClear(c, PAGE * 2, collect);
+    tracker.ForEachDownloadRangeAndClear(c + PAGE, PAGE * 2, collect);
+    tracker.ForEachDownloadRangeAndClear(c, PAGE * 4, collect);
+    REQUIRE(downloads == std::vector<Range>{{c, PAGE * 2}, {c + PAGE * 2, PAGE}});
+    REQUIRE_FALSE(tracker.IsRegionGpuModified(c, PAGE * 4));
+}
+
+TEST_CASE("Consumed read traps rearm on the next GPU write", "[cpu_readback][read_traps]") {
+    VideoCommon::ReadTrapTracker traps;
+    // A GPU write protects both pages; repeated writes need no second core notification.
+    REQUIRE(traps.Arm(c, PAGE * 2));
+    REQUIRE_FALSE(traps.Arm(c, PAGE * 2));
+    REQUIRE_FALSE(traps.Arm(c, PAGE));
+
+    // The first CPU read consumes only its page. The next GPU write must notify the core again.
+    traps.Subtract(c, PAGE);
+    REQUIRE_FALSE(traps.Arm(c + PAGE, PAGE));
+    REQUIRE(traps.Arm(c, PAGE));
+    REQUIRE_FALSE(traps.Arm(c, PAGE));
+    traps.Subtract(c, PAGE);
+    REQUIRE(traps.Arm(c, PAGE));
+
+    // Unmapping the whole buffer must forget both pages before a later mapping reuses them.
+    traps.Subtract(c, PAGE * 2);
+    REQUIRE(traps.Arm(c, PAGE * 2));
+}
+
+TEST_CASE("MemoryTracker: a GPU rewrite needs a fresh CPU readback", "[cpu_readback]") {
+    RasterizerInterface rasterizer;
+    MemoryTracker tracker{rasterizer};
+    tracker.UnmarkRegionAsCpuModified(c, PAGE * 2);
+    tracker.MarkRegionAsGpuModified(c, PAGE);
+    std::vector<Range> downloads;
+    const auto collect = [&](u64 address, u64 size) { downloads.emplace_back(address, size); };
+
+    tracker.ForEachDownloadRangeAndClear(c + PAGE, PAGE, collect);
+    REQUIRE(downloads.empty());
+    REQUIRE(tracker.IsRegionGpuModified(c, PAGE));
+    tracker.ForEachDownloadRangeAndClear(c, PAGE, collect);
+    REQUIRE(downloads == std::vector<Range>{{c, PAGE}});
+    REQUIRE_FALSE(tracker.IsRegionGpuModified(c, PAGE));
+    REQUIRE_FALSE(tracker.IsRegionPreflushable(c, PAGE));
+
+    tracker.MarkRegionAsGpuModified(c, PAGE);
+    REQUIRE(tracker.IsRegionGpuModified(c, PAGE));
+    downloads.clear();
+    tracker.ForEachDownloadRangeAndClear(c, PAGE, collect);
+    REQUIRE(downloads == std::vector<Range>{{c, PAGE}});
+    REQUIRE_FALSE(tracker.IsRegionGpuModified(c, PAGE));
+}
+
+TEST_CASE("CPU read range sets merge overlaps and forget deleted buffer spans", "[cpu_readback]") {
+    Common::RangeSet<DAddr> ranges;
+    ranges.Add(c, PAGE * 2);
+    ranges.Add(c + PAGE, PAGE * 2);
+    ranges.Add(c, PAGE * 2);
+    std::vector<Range> intersections;
+    const auto collect = [&](DAddr lower, DAddr upper) {
+        intersections.emplace_back(lower, upper - lower);
+    };
+    ranges.ForEachInRange(c, PAGE * 4, collect);
+    REQUIRE(intersections == std::vector<Range>{{c, PAGE * 3}});
+
+    ranges.Subtract(c + PAGE, PAGE);
+    intersections.clear();
+    ranges.ForEachInRange(c + PAGE, PAGE, collect);
+    REQUIRE(intersections.empty());
+    ranges.ForEachInRange(c, PAGE * 4, collect);
+    REQUIRE(intersections == std::vector<Range>{{c, PAGE}, {c + PAGE * 2, PAGE}});
+}
+
 TEST_CASE("MemoryTracker: FlushCachedWrites batching") {
     RasterizerInterface rasterizer;
     std::optional<MemoryTracker> memory_track(rasterizer);
@@ -623,78 +702,6 @@ TEST_CASE("MemoryTracker: cached writes preserve tracking counts") {
     REQUIRE(memory_track->IsRegionCpuModified(c + PAGE * 4, PAGE));
     memory_track->MarkRegionAsCpuModified(c, WORD * 2);
     REQUIRE(rasterizer.Count() == 0);
-}
-
-TEST_CASE("MemoryTracker: synchronized range forgets overlapping CPU writes", "[video_core]") {
-    RasterizerInterface rasterizer;
-    std::optional<MemoryTracker> memory_track(rasterizer);
-    memory_track->ForEachUploadRange(c, PAGE * 4, [](u64, u64) {});
-    memory_track->WatchSynchronized(3, c, PAGE * 4);
-    REQUIRE(memory_track->IsSynchronized(3));
-    memory_track->MarkRegionAsCpuModified(c + PAGE * 4, PAGE);
-    memory_track->MarkRegionAsGpuModified(c, PAGE);
-    REQUIRE(memory_track->IsSynchronized(3));
-    memory_track->MarkRegionAsCpuModified(c + PAGE * 3, 1);
-    REQUIRE(!memory_track->IsSynchronized(3));
-
-    memory_track->WatchSynchronized(3, c, PAGE * 4);
-    memory_track->CachedCpuWrite(c + PAGE * 6, PAGE);
-    REQUIRE(memory_track->IsSynchronized(3));
-    memory_track->FlushCachedWrites();
-    REQUIRE(!memory_track->IsSynchronized(3));
-
-    memory_track->WatchSynchronized(3, c, PAGE * 4);
-    memory_track->ForgetSynchronized(3);
-    REQUIRE(!memory_track->IsSynchronized(3));
-}
-
-TEST_CASE("MemoryTracker: a synchronized range has nothing to upload", "[video_core]") {
-    RasterizerInterface rasterizer;
-    std::optional<MemoryTracker> memory_track(rasterizer);
-    std::mt19937 rng{20261104};
-    const auto random_range = [&]() -> Range {
-        const u64 begin = c + (rng() % 120) * PAGE + (rng() % 2) * 100;
-        return {begin, 1 + rng() % (PAGE * 8)};
-    };
-    std::array<Range, 4> watched{};
-    for (int step = 0; step < 20000; ++step) {
-        const auto [addr, size] = random_range();
-        switch (rng() % 7) {
-        case 0:
-            memory_track->MarkRegionAsCpuModified(addr, size);
-            break;
-        case 1:
-            memory_track->CachedCpuWrite(addr, size);
-            break;
-        case 2:
-            memory_track->FlushCachedWrites();
-            break;
-        case 3:
-            memory_track->MarkRegionAsGpuModified(addr, size);
-            break;
-        case 4:
-            memory_track->UnmarkRegionAsCpuModified(addr, size);
-            break;
-        default: {
-            const u32 slot = rng() % 4;
-            memory_track->ForEachUploadRange(addr, size, [](u64, u64) {});
-            memory_track->WatchSynchronized(slot, addr, size);
-            watched[slot] = {addr, size};
-            break;
-        }
-        }
-        for (u32 slot = 0; slot < 4; ++slot) {
-            if (!memory_track->IsSynchronized(slot)) {
-                continue;
-            }
-            const size_t calls = rasterizer.UpdateCallsList().size();
-            int uploads = 0;
-            memory_track->ForEachUploadRange(watched[slot].first, watched[slot].second,
-                                             [&](u64, u64) { ++uploads; });
-            REQUIRE(uploads == 0);
-            REQUIRE(rasterizer.UpdateCallsList().size() == calls);
-        }
-    }
 }
 
 TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch basic") {

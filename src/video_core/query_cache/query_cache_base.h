@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <atomic>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -61,21 +60,6 @@ public:
     void InvalidateRegion(VAddr addr, std::size_t size) {
         IterateCache<true>(addr, size,
                            [this](QueryLocation location) { InvalidateQuery(location); });
-    }
-
-    /// EDEN_NX2_INLINE_INVALIDATE: changes whenever a query is cached.
-    [[nodiscard]] u64 PageSerial() const noexcept {
-        return page_serial.load(std::memory_order_acquire);
-    }
-
-    /// The page serial when no cached query is in [addr, addr + size), else 0.
-    [[nodiscard]] u64 CleanSerial(VAddr addr, std::size_t size) {
-        bool touched = false;
-        IterateCache<false>(addr, size, [&touched](QueryLocation) {
-            touched = true;
-            return true;
-        });
-        return touched ? 0 : page_serial.load(std::memory_order_relaxed);
     }
 
     void FlushRegion(VAddr addr, std::size_t size) {
@@ -194,7 +178,6 @@ protected:
     /// A delayed report rides on the next fence: it must wait for the host GPU (and submit).
     std::atomic<bool> needs_real_fence{false};
     std::mutex cache_mutex;
-    std::atomic<u64> page_serial{1};
 
     struct QueryCacheBaseImpl;
     friend struct QueryCacheBaseImpl;

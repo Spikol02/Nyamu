@@ -16,8 +16,7 @@ class MasterSemaphore;
 
 class CommandPool final : public ResourcePool {
 public:
-    explicit CommandPool(MasterSemaphore& master_semaphore_, const Device& device_,
-                         VkCommandBufferLevel level_ = VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    explicit CommandPool(MasterSemaphore& master_semaphore_, const Device& device_);
     ~CommandPool() override;
 
     void Allocate(size_t begin, size_t end) override;
@@ -28,7 +27,6 @@ private:
     struct Pool;
 
     const Device& device;
-    VkCommandBufferLevel level;
     std::vector<Pool> pools;
 };
 

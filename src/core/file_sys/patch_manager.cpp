@@ -8,7 +8,6 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
-#include <span>
 
 #include "common/assert.h"
 #include "common/hex_util.h"
@@ -46,96 +45,27 @@ constexpr std::array<const char*, 14> EXEFS_FILE_NAMES{
     "subsdk3", "subsdk4",   "subsdk5", "subsdk6", "subsdk7", "subsdk8", "subsdk9",
 };
 
-/// What a built-in patch's write expects to replace in the unpatched module.
-enum class BuiltinCheck : u8 {
-    Word,       ///< exactly `original` (a 4-byte write)
-    BranchLink, ///< any BL instruction (a hooked call; the game's target is not fixed)
-    Zero,       ///< all zero bytes (unused space a patch puts new code in)
-    LoadW8,     ///< a load into w8 (a switch the game reads; replaced by `mov w8, wzr`)
-};
-
-struct BuiltinWrite {
-    size_t module_offset;
-    std::span<const u8> bytes;
-    BuiltinCheck check;
-    u32 original{};
-};
-
 struct BuiltinPatch {
     std::string_view name;
     u64 title_id;
     std::string_view module;
     std::string_view build_id;
-    std::span<const BuiltinWrite> writes;
-};
-
-// Ocarina of Time (main E0F3CCFA...) takes its "dynamic resolution disabled" path, so the 3D
-// renders at full scale instead of following the GPU-time controller down to its 480p floor.
-constexpr std::array<u8, 4> OOT_MAX_RES_BYTES{0x0F, 0x02, 0x00, 0x14}; // b 0x80640c
-constexpr std::array OOT_MAX_RES_WRITES{
-    BuiltinWrite{.module_offset = 0x805BD0,
-                 .bytes = OOT_MAX_RES_BYTES,
-                 .check = BuiltinCheck::Word,
-                 .original = 0x360041E8}, // tbz w8, #0, 0x80640c
-};
-
-// Ocarina of Time's community "Dynamic-fps" exefs patch: the call that returns the frame's time
-// step goes to a function that measures the real time since the last frame (CNTVCT_EL0), so the
-// game keeps its speed when frames take longer.
-constexpr std::array<u8, 4> OOT_DYNAMIC_FPS_HOOK{0x4F, 0x7D, 0xD5, 0x94}; // bl main+0x3c46200
-constexpr std::array<u8, 120> OOT_DYNAMIC_FPS_CODE{
-    0x28, 0x18, 0x20, 0x1e, 0xca, 0x92, 0x00, 0xb0, 0x4a, 0x01, 0x38, 0x91, 0x2b, 0xe0, 0x3b,
-    0xd5, 0x4c, 0x01, 0x40, 0xf9, 0x4b, 0x01, 0x00, 0xf9, 0xcc, 0x02, 0x00, 0xb4, 0x6b, 0x01,
-    0x0c, 0xcb, 0x0d, 0xe0, 0x3b, 0xd5, 0x8e, 0x02, 0x80, 0xd2, 0xae, 0x09, 0xce, 0x9a, 0x7f,
-    0x01, 0x0e, 0xeb, 0xcb, 0x81, 0x8b, 0x9a, 0x4c, 0x05, 0x40, 0xf9, 0x4c, 0x00, 0x00, 0xb5,
-    0xec, 0x03, 0x0b, 0xaa, 0x6e, 0x01, 0x0c, 0xcb, 0x8c, 0x0d, 0x8e, 0x8b, 0x4c, 0x05, 0x00,
-    0xf9, 0x82, 0x01, 0x23, 0x9e, 0xa3, 0x01, 0x23, 0x9e, 0x42, 0x18, 0x23, 0x1e, 0x42, 0x08,
-    0x21, 0x1e, 0xc3, 0x00, 0x00, 0x1c, 0x03, 0x09, 0x23, 0x1e, 0x40, 0x20, 0x23, 0x1e, 0x4d,
-    0x00, 0x00, 0x54, 0x48, 0x40, 0x20, 0x1e, 0xc0, 0x03, 0x5f, 0xd6, 0x0a, 0xd7, 0x83, 0x3f,
-};
-constexpr std::array OOT_DYNAMIC_FPS_WRITES{
-    BuiltinWrite{.module_offset = 0x6E6CC4,
-                 .bytes = OOT_DYNAMIC_FPS_HOOK,
-                 .check = BuiltinCheck::BranchLink},
-    BuiltinWrite{.module_offset = 0x3C46200,
-                 .bytes = OOT_DYNAMIC_FPS_CODE,
-                 .check = BuiltinCheck::Zero},
-};
-
-// Occlusion Off (cLohan's OcclusionOff_ZPrePassAndSamplesQuery mod, via sharkiix v2): `mov w8,
-// wzr` where the game reads its occlusion query, depth pre-pass and samples query switches, so it
-// skips that work (about +25% FPS in Kokiri village on sharkiix's RX 9060 XT).
-constexpr std::array<u8, 4> OOT_MOV_W8_WZR{0xE8, 0x03, 0x1F, 0x2A};
-constexpr std::array OOT_OCCLUSION_OFF_WRITES{
-    BuiltinWrite{.module_offset = 0x11ACF68, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11B838C, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11B83A4, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11ACFC8, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11B83DC, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11B83F4, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
+    size_t module_offset;
+    u32 original;
+    u32 replacement;
 };
 
 constexpr std::array BUILTIN_PATCHES{
-    BuiltinPatch{
-        .name = "Occlusion Off (built-in)",
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .writes = OOT_OCCLUSION_OFF_WRITES,
-    },
+    // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
+    // instead of following the GPU-time controller down to its 480p floor.
     BuiltinPatch{
         .name = "Max Resolution (built-in)",
         .title_id = 0x0400486024DEC000,
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .writes = OOT_MAX_RES_WRITES,
-    },
-    BuiltinPatch{
-        .name = "Dynamic FPS (built-in)",
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .writes = OOT_DYNAMIC_FPS_WRITES,
+        .module_offset = 0x805BD0,
+        .original = 0x360041E8,    // tbz w8, #0, 0x80640c
+        .replacement = 0x1400020F, // b 0x80640c
     },
 };
 
@@ -564,84 +494,36 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             continue;
         }
         if (patch.build_id != build_id) {
-            LOG_WARNING(Loader,
-                        "    - Skipping \"{}\": this game version's {} has build id {}; the patch is "
-                        "made for {}",
-                        patch.name, name, build_id, patch.build_id);
+            LOG_INFO(Loader, "    - Skipping \"{}\": build id {} is not {}", patch.name, build_id,
+                     patch.build_id);
             continue;
         }
-        // Every write must find what it expects in the unpatched module, and none may already
-        // have been changed by a user mod (the mod's patch is used then).
-        bool applicable = true;
-        for (const BuiltinWrite& write : patch.writes) {
-            const size_t offset = sizeof(Loader::NSOHeader) + write.module_offset;
-            if (nso.size() < offset + write.bytes.size() || out.size() < offset + write.bytes.size()) {
-                LOG_WARNING(Loader, "    - Skipping \"{}\": {}+{:#x} is past the module's end",
-                            patch.name, name, write.module_offset);
-                applicable = false;
-                break;
+        const size_t offset = sizeof(Loader::NSOHeader) + patch.module_offset;
+        const auto word_at = [offset](const std::vector<u8>& data) -> std::optional<u32> {
+            if (data.size() < offset + sizeof(u32)) {
+                return std::nullopt;
             }
-            const u8* const original = nso.data() + offset;
-            u32 word{};
-            std::memcpy(&word, original, sizeof(word));
-            // Word: the exact original, or the patch is skipped. BranchLink and Zero are what the
-            // patch was made against; the build id already pins the module, as it does for the
-            // community mod file, so a difference there is only logged.
-            switch (write.check) {
-            case BuiltinCheck::Word:
-                if (word != write.original) {
-                    LOG_WARNING(Loader,
-                                "    - Skipping \"{}\": {}+{:#x} holds {:#010x}, expected {:#010x}",
-                                patch.name, name, write.module_offset, word, write.original);
-                    applicable = false;
-                }
-                break;
-            case BuiltinCheck::BranchLink:
-                if ((word & 0xFC000000U) != 0x94000000U) {
-                    LOG_WARNING(Loader, "    - \"{}\": {}+{:#x} holds {:#010x}, not a BL; patching anyway",
-                                patch.name, name, write.module_offset, word);
-                }
-                break;
-            case BuiltinCheck::Zero:
-                if (!std::all_of(original, original + write.bytes.size(),
-                                 [](u8 byte) { return byte == 0; })) {
-                    LOG_WARNING(Loader,
-                                "    - \"{}\": {}+{:#x} is not empty (first word {:#010x}); patching "
-                                "anyway",
-                                patch.name, name, write.module_offset, word);
-                }
-                break;
-            case BuiltinCheck::LoadW8:
-                // Loads and stores have bits 27-29 set; Rt (bits 0-4) is w8.
-                if ((word & 0x1FU) != 8 || ((word >> 27) & 7U) != 7U) {
-                    LOG_WARNING(Loader,
-                                "    - \"{}\": {}+{:#x} holds {:#010x}, not a load into w8; "
-                                "patching anyway",
-                                patch.name, name, write.module_offset, word);
-                }
-                break;
-            }
-            if (!applicable) {
-                break;
-            }
-            if (std::memcmp(out.data() + offset, original, write.bytes.size()) != 0) {
-                LOG_INFO(Loader,
-                         "    - Skipping \"{}\": a user mod already patched {}+{:#x}, the mod's "
-                         "patch is used",
-                         patch.name, name, write.module_offset);
-                applicable = false;
-                break;
-            }
-        }
-        if (!applicable) {
+            u32 word;
+            std::memcpy(&word, data.data() + offset, sizeof(word));
+            return word;
+        };
+        const auto original = word_at(nso);
+        if (original != patch.original) {
+            LOG_WARNING(Loader, "    - Skipping \"{}\": {}+{:#x} holds {:#010x}, expected {:#010x}",
+                        patch.name, name, patch.module_offset, original.value_or(0),
+                        patch.original);
             continue;
         }
-        for (const BuiltinWrite& write : patch.writes) {
-            std::memcpy(out.data() + sizeof(Loader::NSOHeader) + write.module_offset,
-                        write.bytes.data(), write.bytes.size());
+        if (const auto modded = word_at(out); modded != patch.original) {
+            LOG_INFO(Loader,
+                     "    - Skipping \"{}\": a user mod already patched {}+{:#x} to {:#010x}, "
+                     "the mod's patch is used",
+                     patch.name, name, patch.module_offset, modded.value_or(0));
+            continue;
         }
-        LOG_INFO(Loader, "    - Applying built-in patch \"{}\" ({} writes)", patch.name,
-                 patch.writes.size());
+        std::memcpy(out.data() + offset, &patch.replacement, sizeof(patch.replacement));
+        LOG_INFO(Loader, "    - Applying built-in patch \"{}\" at {}+{:#x}", patch.name, name,
+                 patch.module_offset);
     }
 
     if (out.size() < sizeof(Loader::NSOHeader)) {

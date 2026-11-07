@@ -7,7 +7,6 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -54,9 +53,6 @@ public:
 
     /// Waits for a tick to be hit on the GPU
     void Wait(u64 tick);
-
-    /// Logs a wait for the GPU of half a second or more
-    static void ReportSlowWait(u64 tick, std::chrono::steady_clock::time_point start);
 
     /// Submits the device graphics queue, updating the tick as necessary
     VkResult SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
