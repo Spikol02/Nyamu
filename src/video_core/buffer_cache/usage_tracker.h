@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <utility>
 #include <vector>
 
@@ -24,10 +26,12 @@ public:
     explicit UsageTracker(size_t size) {
         const size_t num_pages = (size >> BUFFER_PAGE_SHIFT) + 1;
         pages.resize(num_pages, 0ULL);
+        full_pages.resize((num_pages + 63) / 64, 0ULL);
     }
 
     void Reset() noexcept {
         std::ranges::fill(pages, 0ULL);
+        std::ranges::fill(full_pages, 0ULL);
         recent.fill({~u64{0}, 0});
     }
 
@@ -50,8 +54,12 @@ public:
         if (page == page_end) {
             return;
         }
-        for (size_t i = page + 1; i < page_end; i++) {
-            pages[i] = ~u64{0};
+        if (SkipFullPages()) {
+            FillPages(page + 1, page_end);
+        } else {
+            for (size_t i = page + 1; i < page_end; i++) {
+                pages[i] = ~u64{0};
+            }
         }
         const size_t offset_end = offset + size;
         const size_t offset_end_page_aligned = Common::AlignDown(offset_end, BUFFER_PAGE_BYTES);
@@ -78,6 +86,31 @@ public:
     }
 
 private:
+    /// EDEN_NX2_USAGE_TRACKER_SKIP_FULL=0 writes every page of a range again, as before.
+    static bool SkipFullPages() noexcept {
+        static const bool skip = [] {
+            const char* value = std::getenv("EDEN_NX2_USAGE_TRACKER_SKIP_FULL");
+            return !(value && value[0] == '0');
+        }();
+        return skip;
+    }
+
+    /// Marks pages [begin, end) fully used. Draws bind the same multi-megabyte storage buffers
+    /// many times between resets, so 64 pages at a time already full are skipped.
+    void FillPages(size_t begin, size_t end) noexcept {
+        for (size_t i = begin; i < end;) {
+            const size_t word = i >> 6;
+            const size_t bit = i & 63;
+            const size_t count = std::min<size_t>(64 - bit, end - i);
+            const u64 mask = (count == 64 ? ~u64{0} : (u64{1} << count) - 1) << bit;
+            if ((full_pages[word] & mask) != mask) {
+                std::fill_n(pages.begin() + i, count, ~u64{0});
+                full_pages[word] |= mask;
+            }
+            i += count;
+        }
+    }
+
     void TrackPage(u64 page, u64 offset, u64 size) noexcept {
         const size_t offset_in_page = offset % BUFFER_PAGE_BYTES;
         const size_t first_bit = offset_in_page >> BUFFER_BYTES_PER_BITSHIFT;
@@ -97,6 +130,8 @@ private:
 
 private:
     std::vector<u64> pages;
+    /// One bit per page: set only when that page is all ones in pages.
+    std::vector<u64> full_pages;
     /// Ranges tracked last, (offset, size).
     std::array<std::pair<u64, u64>, 4> recent{{{~u64{0}, 0}, {~u64{0}, 0}, {~u64{0}, 0}, {~u64{0}, 0}}};
     size_t recent_cursor{};
