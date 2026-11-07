@@ -964,6 +964,48 @@ bool TextureCache<P>::RescaleRenderTargets() {
 }
 
 template <class P>
+void TextureCache<P>::NoteRenderTargetsCleared(bool color, bool depth) {
+    const auto note = [this](ImageViewId id) {
+        if (!id || !IsFullClear(id)) {
+            return;
+        }
+        ImageBase& image = slot_images[slot_image_views[id].image_id];
+        if (image.clear_frame != frame_tick) {
+            image.previous_clear_frame = image.clear_frame;
+            image.clear_frame = frame_tick;
+        }
+    };
+    if (color) {
+        for (const ImageViewId id : render_targets.color_buffer_ids) {
+            note(id);
+        }
+    }
+    if (depth) {
+        note(render_targets.depth_buffer_id);
+    }
+}
+
+template <class P>
+int TextureCache<P>::RenderTargetsRedrawnReason() {
+    int reason = 1;
+    const auto check = [&](ImageViewId id) {
+        if (!id) {
+            return;
+        }
+        const ImageBase& image = slot_images[slot_image_views[id].image_id];
+        const int own = image.clear_frame != frame_tick                     ? 2
+                        : image.previous_clear_frame + 1 != frame_tick ? 3
+                                                                        : 0;
+        reason = reason == 1 ? own : (std::max)(reason, own);
+    };
+    for (const ImageViewId id : render_targets.color_buffer_ids) {
+        check(id);
+    }
+    check(render_targets.depth_buffer_id);
+    return reason;
+}
+
+template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
     struct ClearingScope {

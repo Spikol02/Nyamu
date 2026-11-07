@@ -542,6 +542,7 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(NativeAsyncDraws, Wait, tr("Wait")),
                               PAIR(NativeAsyncDraws, Bounded, tr("Bounded wait")),
                               PAIR(NativeAsyncDraws, Skip, tr("Skip")),
+                              PAIR(NativeAsyncDraws, Transient, tr("Skip only redrawn targets")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::FrameGenType>::Index(),
                           {
