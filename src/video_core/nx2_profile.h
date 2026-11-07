@@ -156,7 +156,7 @@ enum class Counter : u32 {
     PredictMet,          ///< A queued release meets the acquire: no wait
     PredictNotMet,       ///< A queued release's value doesn't meet it
     PredictNoWrite,      ///< No write to that granule is tracked
-    PredictOtherAddress, ///< The granule's last write went to another address in it
+    PredictOtherAddress, ///< The acquire's address isn't word-aligned
     PredictUnknownValue, ///< Its last write has no known value (a report or reduction)
     PredictWriterAfter,  ///< Compute or copy work was sent after the release
     PredictRan,          ///< The back already ran the release
@@ -240,7 +240,7 @@ inline void Report(const char* thread_name = "GPU thread") {
         return static_cast<double>(data.counters[static_cast<size_t>(counter)]) * 1e9 / window;
     };
     line += fmt::format(" | resume checks {:.0f} | queued release: met {:.0f}, not met {:.0f}, "
-                        "no write {:.0f}, other address {:.0f}, unknown value {:.0f}, "
+                        "no write {:.0f}, unaligned {:.0f}, unknown value {:.0f}, "
                         "writer after {:.0f}, already ran {:.0f}",
                         per_second(Counter::ResumeChecks), per_second(Counter::PredictMet),
                         per_second(Counter::PredictNotMet), per_second(Counter::PredictNoWrite),
