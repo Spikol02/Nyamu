@@ -421,11 +421,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -x build/release/bin/lichii
+          test -x build/release/bin/nyamu
           test -x build/release/bin/eden-cli
-          strip build/release/bin/lichii build/release/bin/eden-cli
+          strip build/release/bin/nyamu build/release/bin/eden-cli
           tar -czf "lichii-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz" \
-            -C build/release/bin lichii eden-cli
+            -C build/release/bin nyamu eden-cli
           ls -la "lichii-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz"
 
       # A self-contained AppImage: linuxdeploy bundles every library the two programs need except
@@ -436,7 +436,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -x build/release/bin/lichii
+          test -x build/release/bin/nyamu
           test -x build/release/bin/eden-cli
           tools="$RUNNER_TEMP/linuxdeploy"
           mkdir -p "$tools"
@@ -460,7 +460,7 @@ jobs:
           export OUTPUT="$LDAI_OUTPUT"
           export ARCH="$arch"
           "$tools/linuxdeploy-$arch.AppImage" --appdir AppDir \
-            --executable build/release/bin/lichii \
+            --executable build/release/bin/nyamu \
             --executable build/release/bin/eden-cli \
             --desktop-file dist/io.github.zortos293.lichii.desktop \
             --icon-file "$icon" \
@@ -473,12 +473,12 @@ jobs:
         if: matrix.platform == 'windows-x86_64'
         shell: pwsh
         run: |
-          foreach ($exe in 'lichii.exe', 'eden-cli.exe') {
+          foreach ($exe in 'nyamu.exe', 'eden-cli.exe') {
             if (-not (Test-Path "build/release/bin/$exe")) {
               throw "build/release/bin/$exe was not produced"
             }
           }
-          windeployqt --release --no-translations build/release/bin/lichii.exe
+          windeployqt --release --no-translations build/release/bin/nyamu.exe
 
       # A dynamic MinGW build is not portable on its own: windeployqt6 brings the Qt libraries and
       # plugins, then every non-system DLL the binaries and those plugins pull in gets copied next to
@@ -490,10 +490,10 @@ jobs:
           set -euo pipefail
           export PATH="/ucrt64/bin:$PATH"
           cd build/release/bin
-          test -f lichii.exe
+          test -f nyamu.exe
           test -f eden-cli.exe
           windeployqt6 --no-translations --no-compiler-runtime --no-opengl-sw \
-            --no-system-dxc-compiler --no-system-d3d-compiler lichii.exe
+            --no-system-dxc-compiler --no-system-d3d-compiler nyamu.exe
           deps() {
             objdump -p "$1" | awk '/DLL Name:/ {print $3}' | while read -r dll; do
               [ -z "$dll" ] && continue
@@ -509,7 +509,7 @@ jobs:
               fi
             done
           }
-          for exe in lichii.exe eden-cli.exe; do
+          for exe in nyamu.exe eden-cli.exe; do
             deps "$exe"
           done
           find . -name '*.dll' | while read -r dll; do
@@ -524,8 +524,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app=build/release/bin/lichii.app
-          test -x "$app/Contents/MacOS/lichii"
+          app=build/release/bin/nyamu.app
+          test -x "$app/Contents/MacOS/nyamu"
           test -x build/release/bin/eden-cli
           cp build/release/bin/eden-cli "$app/Contents/MacOS/eden-cli"
           "$(brew --prefix qt@6)/bin/macdeployqt" "$app" \
@@ -542,7 +542,7 @@ jobs:
               done
           done
           # Libraries that load their dependencies through @rpath find them in the bundle.
-          for program in lichii eden-cli; do
+          for program in nyamu eden-cli; do
             install_name_tool -add_rpath @executable_path/../Frameworks \
               "$app/Contents/MacOS/$program" 2> /dev/null
           done
@@ -567,9 +567,9 @@ jobs:
           codesign --verify --deep --strict "$app"
           ditto -c -k --keepParent "$app" "lichii-${GITHUB_SHA}-${{ matrix.platform }}.zip"
           ls -la "lichii-${GITHUB_SHA}-${{ matrix.platform }}.zip"
-          # Also ship a .dmg (drag lichii.app onto Applications).
+          # Also ship a .dmg (drag nyamu.app onto Applications).
           dmgdir=$(mktemp -d)
-          ditto "$app" "$dmgdir/lichii.app"
+          ditto "$app" "$dmgdir/nyamu.app"
           ln -s /Applications "$dmgdir/Applications"
           hdiutil create -volname "Lichii" -srcfolder "$dmgdir" -ov -format UDZO \
             "lichii-${GITHUB_SHA}-${{ matrix.platform }}.dmg"
@@ -691,7 +691,7 @@ jobs:
 
           ## Windows
 
-          Windows packages are in-place zip files: extract and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal.
+          Windows packages are in-place zip files: extract and run \`nyamu.exe\`, or \`eden-cli.exe\` from a terminal.
 
           | Build Type | Standard | PGO (Recommended) | Notes |
           | --- | --- | --- | --- |
