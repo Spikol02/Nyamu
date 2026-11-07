@@ -1026,9 +1026,20 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
 }
 
 void Maxwell3D::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontState& fs) {
+    decltype(Regs::ReportSemaphore::query) query{};
+    query.raw = fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.query)];
+    // A release or report of the payload (ProcessQueryGet) stores it; counters aren't known here.
+    using Operation = Regs::ReportSemaphore::Operation;
+    const bool stores_payload =
+        (query.operation == Operation::Release || query.operation == Operation::ReportOnly) &&
+        query.report == Regs::ReportSemaphore::Report::Payload && query.reduction_enable == 0;
     split.NoteSemaphoreWrite(
         (GPUVAddr{fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_high)]} << 32) |
-        fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_low)]);
+            fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_low)],
+        stores_payload
+            ? std::optional<u32>{fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.payload)]}
+            : std::nullopt,
+        query.short_query != 0 ? 4 : 16);
 }
 
 void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,

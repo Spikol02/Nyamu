@@ -620,9 +620,10 @@ void DmaPusher::FrontNoteComputeReport(u32 method, u32 argument) {
     }
     // Without a reduction (bit 3) the release stores the payload (SET_REPORT_SEMAPHORE_C).
     const bool reduction = ((argument >> 3) & 1) != 0;
+    const bool one_word = ((argument >> 28) & 1) != 0;
     VideoCommon::GpuSplit::Get().NoteSemaphoreWrite(
         (GPUVAddr{front_compute_report[0] & 0x1ffffff} << 32) | front_compute_report[1],
-        reduction ? std::nullopt : std::optional<u32>{front_compute_report[2]});
+        reduction ? std::nullopt : std::optional<u32>{front_compute_report[2]}, one_word ? 4 : 16);
 }
 
 void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {

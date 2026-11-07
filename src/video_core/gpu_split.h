@@ -182,19 +182,26 @@ public:
     static constexpr size_t SemSlot(u64 granule) noexcept {
         return static_cast<size_t>((granule ^ (granule >> 10) ^ (granule >> 20)) & (SemSlots - 1));
     }
-    /// `payload`: the value the write stores, when the front knows it (a plain release).
-    void NoteSemaphoreWrite(u64 addr, std::optional<u32> payload = std::nullopt) noexcept {
+    /// `payload`: the value the write stores at `addr`, when the front knows it (a plain
+    /// release); `size`: the bytes it writes (16 with a timestamp, 4 for a one-word release).
+    void NoteSemaphoreWrite(u64 addr, std::optional<u32> payload = std::nullopt,
+                            u64 size = 16) noexcept {
         const u64 granule = addr >> 4;
         SemWrite& slot = sem_writes[SemSlot(granule)];
         // Evicting a write the back has not run yet: later lookups can't see it, so wait for it.
         if (slot.granule != granule && slot.position > consumed_cache) {
             sem_evicted_position = std::max(sem_evicted_position, slot.position);
         }
-        slot = {granule, write_position, addr, payload.value_or(0), payload.has_value()};
+        slot = {granule, write_position};
+        // Per word: Switch 2 packs semaphores tightly, so one granule holds several.
+        for (u64 word = addr >> 2; word <= (addr + size - 1) >> 2; ++word) {
+            const bool known = payload && word == addr >> 2;
+            word_writes[WordSlot(word)] = {word, write_position, known ? *payload : 0, known};
+        }
         last_release_position = write_position;
     }
     /// The value a release still queued for the back will store at `addr`, when it is the last
-    /// write sent to that granule, its value is known and no compute or copy work (which could
+    /// write sent to that word, its value is known and no compute or copy work (which could
     /// also write there) was sent after it. The back runs it before anything sent later, so an
     /// acquire it meets needs no wait.
     enum class ReleaseMiss : u8 { None, NoWrite, OtherAddress, UnknownValue, WriterAfter, Ran };
@@ -203,12 +210,12 @@ public:
         ReleaseMiss miss{};
     };
     [[nodiscard]] ReleaseLookup QueuedRelease(u64 addr) const noexcept {
-        const SemWrite& slot = sem_writes[SemSlot(addr >> 4)];
-        if (slot.granule != addr >> 4) {
-            return {std::nullopt, ReleaseMiss::NoWrite};
-        }
-        if (slot.addr != addr) {
+        if ((addr & 3) != 0) {
             return {std::nullopt, ReleaseMiss::OtherAddress};
+        }
+        const WordWrite& slot = word_writes[WordSlot(addr >> 2)];
+        if (slot.word != addr >> 2) {
+            return {std::nullopt, ReleaseMiss::NoWrite};
         }
         if (!slot.known) {
             return {std::nullopt, ReleaseMiss::UnknownValue};
@@ -303,11 +310,19 @@ private:
     struct SemWrite {
         u64 granule{~u64{0}};
         u64 position{};
-        u64 addr{};
+    };
+    std::array<SemWrite, SemSlots> sem_writes{};
+    static constexpr size_t WordSlots = 4096;
+    static constexpr size_t WordSlot(u64 word) noexcept {
+        return static_cast<size_t>((word ^ (word >> 12) ^ (word >> 24)) & (WordSlots - 1));
+    }
+    struct WordWrite {
+        u64 word{~u64{0}};
+        u64 position{};
         u32 payload{};
         bool known{};
     };
-    std::array<SemWrite, SemSlots> sem_writes{};
+    std::array<WordWrite, WordSlots> word_writes{};
     u64 sem_evicted_position{};
     u64 published_local{};
     u64 consumed_cache{};
