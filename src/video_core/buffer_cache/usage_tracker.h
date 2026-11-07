@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <utility>
 #include <vector>
 
@@ -53,7 +54,13 @@ public:
         if (page == page_end) {
             return;
         }
-        FillPages(page + 1, page_end);
+        if (SkipFullPages()) {
+            FillPages(page + 1, page_end);
+        } else {
+            for (size_t i = page + 1; i < page_end; i++) {
+                pages[i] = ~u64{0};
+            }
+        }
         const size_t offset_end = offset + size;
         const size_t offset_end_page_aligned = Common::AlignDown(offset_end, BUFFER_PAGE_BYTES);
         TrackPage(page_end, offset_end_page_aligned, offset_end - offset_end_page_aligned);
@@ -79,6 +86,15 @@ public:
     }
 
 private:
+    /// EDEN_NX2_USAGE_TRACKER_SKIP_FULL=0 writes every page of a range again, as before.
+    static bool SkipFullPages() noexcept {
+        static const bool skip = [] {
+            const char* value = std::getenv("EDEN_NX2_USAGE_TRACKER_SKIP_FULL");
+            return !(value && value[0] == '0');
+        }();
+        return skip;
+    }
+
     /// Marks pages [begin, end) fully used. Draws bind the same multi-megabyte storage buffers
     /// many times between resets, so 64 pages at a time already full are skipped.
     void FillPages(size_t begin, size_t end) noexcept {
