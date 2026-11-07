@@ -372,7 +372,7 @@ target_sources(yuzu
 if (APPLE)
     target_sources(yuzu PRIVATE util/macos_sleep.cpp util/macos_sleep.h)
 
-    # Use the supplied Lichii artwork for all macOS generators.
+    # Use the supplied Nyamu artwork for all macOS generators.
     set(_dist "${CMAKE_SOURCE_DIR}/dist")
     set(_icons "${_dist}/lichii.icns")
     if (CMAKE_GENERATOR MATCHES "Xcode")
