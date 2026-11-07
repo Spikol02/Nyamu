@@ -4,7 +4,7 @@
 
 """Reports an EDEN_NX2_SAMPLE_PROFILE file (src/common/nx2_sample_profile.h).
 
-    python3 -I tools/nx2/sample_report.py nx2_samples_<pid>.bin --exe lichii.exe [--folded out.txt] [--svg out.svg]
+    python3 -I tools/nx2/sample_report.py nx2_samples_<pid>.bin --exe nyamu.exe [--folded out.txt] [--svg out.svg]
 
 Symbolizes lichii.exe frames with llvm-symbolizer (lichii.pdb next to the exe), caching the
 result next to the sample file, and prints per thread: self and inclusive time by function and
@@ -243,7 +243,7 @@ def report(threads, hz, top=25, paths=30, out=sys.stdout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("samples")
-    parser.add_argument("--exe", default="lichii.exe", help="lichii.exe of the build (lichii.pdb next to it)")
+    parser.add_argument("--exe", default="nyamu.exe", help="nyamu.exe of the build (nyamu.pdb next to it)")
     parser.add_argument("--symbolizer", default="llvm-symbolizer")
     parser.add_argument("--top", type=int, default=25)
     parser.add_argument("--paths", type=int, default=30)
