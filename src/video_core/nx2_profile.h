@@ -76,7 +76,10 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
 inline const char* const g_profile_env = std::getenv("EDEN_NX2_GPU_PROFILE");
 inline const bool g_drains_only =
     g_profile_env != nullptr && std::string_view{g_profile_env} == "drains";
-inline const bool g_enabled = g_profile_env != nullptr && !g_drains_only;
+// Off while EDEN_NX2_SAMPLE_PROFILE samples (common/nx2_sample_profile.h): the zone timers would
+// show up in the samples.
+inline const bool g_enabled = g_profile_env != nullptr && !g_drains_only &&
+                              std::getenv("EDEN_NX2_SAMPLE_PROFILE") == nullptr;
 
 inline bool Enabled() {
     return g_enabled;

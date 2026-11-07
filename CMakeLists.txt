@@ -205,6 +205,10 @@ if (CXX_CLANG_CL)
             $<$<COMPILE_LANGUAGE:C,CXX>:-mcx16>
         )
     endif()
+    # Function names and line numbers in the PDB, for crash dumps and EDEN_NX2_SAMPLE_PROFILE.
+    # They don't change the generated code; /DEBUG turns REF and ICF off unless they are named.
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/Z7> $<$<COMPILE_LANGUAGE:C,CXX>:-gline-tables-only>)
+    add_link_options(/DEBUG /OPT:REF /OPT:ICF)
 endif()
 
 # Disable Warnings as Errors for MSVC

@@ -126,6 +126,8 @@ add_library(
     thread.h
     thread_cpu_clock.cpp
     thread_cpu_clock.h
+    nx2_sample_profile.cpp
+    nx2_sample_profile.h
     adpf.cpp
     adpf.h
     thread_queue_list.h
