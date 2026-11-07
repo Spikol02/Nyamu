@@ -137,6 +137,13 @@ public:
         return false;
     }
 
+    /// Whether the query cache still lists a report in the range (pending host results, or
+    /// written and not unregistered yet). Callable from the split front; true where unknown.
+    [[nodiscard]] virtual bool HasCachedReports([[maybe_unused]] DAddr addr,
+                                                [[maybe_unused]] u64 size) {
+        return true;
+    }
+
     /// Flushes commands and blocks until a new fence has popped, which writes pending reports.
     virtual void WaitForQueries() {}
 

@@ -180,6 +180,8 @@ The `nx2_switches.txt` beside the program turns the split GPU thread's speed swi
 
 On Windows PCs with 6 or more cores, the GPU thread and the split's back each get a physical core of their own (cores 1 and 2), and the emulated CPU cores stay off them (from Frizti/Lichii; Lake Hylia on a Ryzen 7 7800X3D went from 51.3 to 55.6 fps there). `EDEN_NX2_PIN_THREADS=0` turns it off; `EDEN_NX2_PIN_FRONT`/`EDEN_NX2_PIN_BACK` still choose CPUs by hand.
 
+Macro memory reads of pages the GPU wrote (Ocarina of Time reads an occlusion report per object) are served from a snapshot of the page taken at the last full wait, while nothing sent since may write the page or make draws' writes visible and the query cache lists no report there (from Frizti/Lichii, after EvilOOT's dma-snapshot fix). It needs `EDEN_NX2_DMA_RANGES=1`; `EDEN_NX2_DMA_SNAPSHOT=0` turns it off and `=2` checks every skipped wait against a full one, logging any difference.
+
 ## License and AI disclosure
 
 GPL-3.0-or-later, the same as the projects it's based on. See `LICENSE.txt`.

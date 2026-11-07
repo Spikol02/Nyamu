@@ -3402,6 +3402,10 @@ private:
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
     void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
                       u32 count);
+    /// EDEN_NX2_DMA_SNAPSHOT: serves a macro parameter read from a snapshot of its pages when
+    /// nothing sent since may change them. Returns false to take the normal path.
+    bool FrontDmaSnapshotRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro,
+                              GPUVAddr source, u32 words);
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
     /// EDEN_NX2_CB_COALESCE: sends the macro's gathered constant buffer data words as one entry.
     void FlushFrontCbData(VideoCommon::GpuSplit& split, FrontState& state);

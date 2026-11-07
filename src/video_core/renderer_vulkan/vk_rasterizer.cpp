@@ -1952,6 +1952,10 @@ bool RasterizerVulkan::HasPendingQueries(DAddr addr, u64 size) {
     return query_cache.IsRegionGpuModified(addr, size);
 }
 
+bool RasterizerVulkan::HasCachedReports(DAddr addr, u64 size) {
+    return query_cache.HasCachedReports(addr, size);
+}
+
 void RasterizerVulkan::WaitForQueries() {
     fence_manager.SignalAndWait();
 }

@@ -269,6 +269,40 @@ public:
     /// work before the last host-level wait or visibility point.
     bool WaitForMemoryWritersIn(GPUVAddr begin, GPUVAddr end, bool gpu_pages, DrainSite site);
 
+    /// The ring position of everything sent so far.
+    [[nodiscard]] u64 SentPosition() const {
+        return write_position;
+    }
+    /// EDEN_NX2_DMA_SNAPSHOT: whether work sent after position `since` may write [begin, end) or
+    /// make earlier draws' writes visible. 0 = no, else why: 1 compute or copy, 2 an untracked
+    /// write, 3 a host-level wait or visibility point, 4 an overlapping ranged write. Always 2
+    /// without EDEN_NX2_DMA_RANGES.
+    [[nodiscard]] u32 MayBeWrittenSince(u64 since, GPUVAddr begin, GPUVAddr end) const {
+        if (!ranges_enabled) {
+            return 2;
+        }
+        if (last_writer_position > since) {
+            return 1;
+        }
+        if (last_untracked_write_position > since) {
+            return 2;
+        }
+        if (last_sync_position > since || last_visibility_position > since) {
+            return 3;
+        }
+        for (size_t i = 0; i < range_count; ++i) {
+            const RangeWrite& range =
+                range_writes[(range_head + MaxRangeWrites - 1 - i) % MaxRangeWrites];
+            if (range.position <= since) {
+                break;
+            }
+            if (range.begin < end && begin < range.end) {
+                return 4;
+            }
+        }
+        return 0;
+    }
+
     /// Counters for the EDEN_NX2_DMA_RANGES report (front thread).
     struct RangeStats {
         u64 reads{};
