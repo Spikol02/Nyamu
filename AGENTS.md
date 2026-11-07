@@ -41,7 +41,7 @@ Lichii is a fork of [Eglantine](https://github.com/Djihads80/Eglantine). Do not 
 
 ## Debugging tools
 
-Use these before guessing. All are off unless the variable is set; pass them as the env argument of `build-fix.sh`. Read them from the log at `*:Info` unless noted.
+Use these before guessing. All are off unless the variable is set; set them in the Command Prompt before starting `nyamu.exe` (`set NAME=VALUE&& C:\Nyamu\build\bin\nyamu.exe`). Read them from the log at `*:Info` unless noted.
 
 | Symptom | Tool | Output |
 |---|---|---|
@@ -50,12 +50,12 @@ Use these before guessing. All are off unless the variable is set; pass them as 
 | Draw and render-state questions | `EDEN_NX2_RENDER_TRACE=1`, filter `*:Info HW.GPU:Debug Render.Vulkan:Debug Shader:Debug` | Per-draw state, rejected stages and zero-format texture descriptors. |
 | Video playback | `EDEN_NX2_VDEC_TRACE=1`, `EDEN_NX2_VDEC_DUMP=<dir>` | Decoder submit, decode and composite trace; decoded frames. |
 | Performance and frame pacing | `EDEN_NX2_GPU_PROFILE=1`, `EDEN_DKB_FRAME_TRACE=1` | GPU thread time per second by zone; per-present interval, CPU and fence timing. |
-| Which functions a thread spends its time in (Windows) | `EDEN_NX2_SAMPLE_PROFILE=<hz>` with `EDEN_NX2_SAMPLE_DELAY=<s>` or `file` (starts once `sample.now` exists in the log directory), `EDEN_NX2_SAMPLE_SECONDS=<s>` (default 20), `EDEN_NX2_SAMPLE_THREADS` (default `GPU,GPUBack,VulkanWorker`; `CPUCore_*` adds the guest cores) | `nx2_samples_<pid>.bin` in the log directory. `python3 -I tools/nx2/sample_report.py <file> --exe lichii.exe [--svg out.svg]` prints self and inclusive time by function and the top call paths per thread (lichii.pdb next to the exe). Turns the GPU_PROFILE zone timers off. |
+| Which functions a thread spends its time in (Windows) | `EDEN_NX2_SAMPLE_PROFILE=<hz>` with `EDEN_NX2_SAMPLE_DELAY=<s>` or `file` (starts once `sample.now` exists in the log directory), `EDEN_NX2_SAMPLE_SECONDS=<s>` (default 20), `EDEN_NX2_SAMPLE_THREADS` (default `GPU,GPUBack,VulkanWorker`; `CPUCore_*` adds the guest cores) | `nx2_samples_<pid>.bin` in the log directory. `python3 -I tools/nx2/sample_report.py <file> --exe nyamu.exe [--svg out.svg]` prints self and inclusive time by function and the top call paths per thread (nyamu.pdb next to the exe). Turns the GPU_PROFILE zone timers off. |
 | Command corruption or pop-in | `EDEN_NX2_PB_CHECK=1`; A/B with `EDEN_NX2_PB_SNAPSHOT=0` or `EDEN_NX2_FETCH_DRAIN=1` | How many pushbuffer entries change between submit and parse. |
 | Split GPU thread races | `EDEN_NX2_SPLIT_CHECK=1` | Reports scheduler use from the wrong thread. |
 | Upscaler and DLSS contracts | `EDEN_NX2_DLSS_CONTRACT_TRACE=1` | Inputs and outputs of replaced upscaler networks. |
 | Service calls | `EDEN_NX2_IPC_TRACE=1` | IPC command trace. |
-| Host crash (log just stops) | Windows minidump in `%LOCALAPPDATA%\CrashDumps\lichii.exe.<pid>.dmp` | Read the exception and stack with the `minidump` Python package, then symbolize with `llvm-symbolizer --obj=lichii.exe --inlines --relative-address <offset>` next to the build's `lichii.pdb`. |
+| Host crash (log just stops) | Windows minidump in `%LOCALAPPDATA%\CrashDumps\nyamu.exe.<pid>.dmp` | Read the exception and stack with the `minidump` Python package, then symbolize with `llvm-symbolizer --obj=nyamu.exe --inlines --relative-address <offset>` next to the build's `nyamu.pdb`. |
 
 ## How work is split
 
@@ -68,6 +68,5 @@ Use these before guessing. All are off unless the variable is set; pass them as 
 ## Builds
 
 - Cloud machines build with clang and Ninja for compile and unit-test checks.
-- The build the owner tests runs on the owner's Windows PC (DESKTOP-4UD89UT, Ryzen 9 5900X), built with clang using 12 jobs (`cmake --build <dir> --parallel 12`).
-- On the PC the toolchain is clang-cl (LLVM 22) with the VS 2022 SDK, Qt 6.8.3 in `C:/lx/qt`, Ninja and sccache. Source is `C:/lx/src`, the persistent build dir is `C:/lx/build`, and `C:/lx/configure.sh` holds the configure flags. Build and package a fix with one command: `bash C:/lx/build-fix.sh <branch> <build-name> "<Game> - <fix>" ["ENV=VAL ..."] ["log filter"]`.
-- Every fix gets its own debug build on that PC in `C:\Users\Zortos\.capy\work\lichii-debug\<build>\` and a desktop shortcut `Lichii Debug - <Game> - <fix>` that launches it with the owner's existing user data and keeps the log next to the build, so the owner can run it and send the log back.
+- The build the owner tests runs on the owner's Windows PC: Ryzen 7 7800X3D (16 threads), Radeon RX 9070 XT (AMD proprietary driver). Report performance numbers against this rig.
+- On the PC the toolchain is clang-cl (LLVM) with the VS 2022 SDK, Qt in `C:/lx/qt` and Ninja, run from an "x64 Native Tools Command Prompt for VS 2022". Source is `C:\Nyamu` and the build dir is `C:\Nyamu\build`. Configure: `cmake -S C:\Nyamu -B C:\Nyamu\build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_C_COMPILER=C:/Program Files/LLVM/bin/clang-cl.exe" "-DCMAKE_CXX_COMPILER=C:/Program Files/LLVM/bin/clang-cl.exe" -DCMAKE_PREFIX_PATH=C:/lx/qt -DYUZU_TESTS=ON -DBUILD_TESTING=ON`; build: `cmake --build C:\Nyamu\build --parallel 16`. The program is `C:\Nyamu\build\bin\nyamu.exe` and logs are in `%APPDATA%\eden\log`.
