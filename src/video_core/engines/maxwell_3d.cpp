@@ -1249,10 +1249,13 @@ void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& f
         if (!device) {
             return; // CounterReport writes nothing at an unmapped address.
         }
-        // A short payload release is a fence: its payload is known.
+        // A short payload release is a fence: its payload is known. On Switch 2 the query cache
+        // writes it only once the host GPU finished the work before it (free_on_run), so it is
+        // treated as a timed write there.
         if (query_regs.query.operation == Regs::ReportSemaphore::Operation::Release &&
             query_regs.query.short_query != 0 &&
-            query_regs.query.report == Regs::ReportSemaphore::Report::Payload) {
+            query_regs.query.report == Regs::ReportSemaphore::Report::Payload &&
+            !Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
             const u32 payload = fs.regs[base + 2];
             split.NoteMemoryWriteData(*device, &payload, 1);
             split.NoteReportWrite(*device, 4);

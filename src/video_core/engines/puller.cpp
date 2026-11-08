@@ -476,7 +476,9 @@ static void NoteSemaphoreWrite(DmaPusher& dma_pusher, GPUVAddr address,
     const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
     if (!device) {
         return; // Queries write nothing at an unmapped address.
-    } else if (fence_payload) {
+    } else if (fence_payload && !g_nx2_ampere) {
+        // On Switch 2 a fence release is written once the host GPU finished the work before it
+        // (QueryCacheBase free_on_run), so it is a timed write there.
         split.NoteMemoryWriteData(*device, &*fence_payload, 1);
         split.NoteReportWrite(*device, 4);
     } else {
