@@ -95,7 +95,11 @@ bool QueuedReleaseMeets(GPUVAddr address, const Matches& matches) {
         }
         VideoCommon::Nx2Profile::Add(counter, 1);
     }
-    return lookup.value && matches(*lookup.value);
+    if (lookup.value && matches(*lookup.value)) {
+        split.NotePredictedRelease(lookup.position);
+        return true;
+    }
+    return false;
 }
 
 // The fence manager records into the scheduler and downloads the CPU's writes over GPU data:
