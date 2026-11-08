@@ -260,9 +260,6 @@ public:
 
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 
-    /// EDEN_NX2_PREFLUSH_DECAY_MS: clears the Preflushable marks periodically (TickFrame).
-    void DecayPreflushMarks();
-
     /// Without downloads at every fence, a guest CPU read is the only way GPU-written buffer
     /// data reaches guest memory, so reads must ask the buffer cache (GetFlushArea).
     bool FlushesOnCpuRead() const {
@@ -270,6 +267,9 @@ public:
     }
 
     bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer);
+
+    /// EDEN_NX2_PREFLUSH_DECAY_MS: clears the Preflushable marks periodically (TickFrame).
+    void DecayPreflushMarks();
 
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size);
 
