@@ -679,6 +679,25 @@ struct Values {
     SwitchableSetting<bool> use_asynchronous_shaders{linkage, false, "use_asynchronous_shaders",
                                                      Category::RendererHacks};
 
+    // What a Switch 2 draw does when its graphics pipeline is still building (asynchronous
+    // shaders on): Wait for it, Skip it, or wait up to native_pipeline_wait_ms per frame (Bounded).
+    SwitchableSetting<NativeAsyncDraws> native_async_draws{linkage,
+                                                           NativeAsyncDraws::Wait,
+                                                           "native_async_draws",
+                                                           Category::RendererHacks,
+                                                           Specialization::Default,
+                                                           true,
+                                                           true};
+    SwitchableSetting<u32, true> native_pipeline_wait_ms{linkage,
+                                                         8,
+                                                         1,
+                                                         100,
+                                                         "native_pipeline_wait_ms",
+                                                         Category::RendererHacks,
+                                                         Specialization::Countable,
+                                                         true,
+                                                         true};
+
     SwitchableSetting<GpuUnswizzleSize> gpu_unswizzle_texture_size{linkage,
                                                   GpuUnswizzleSize::Large,
                                                   "gpu_unswizzle_texture_size",

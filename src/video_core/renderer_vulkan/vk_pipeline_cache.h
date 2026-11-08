@@ -142,7 +142,7 @@ public:
 private:
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
-    [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
+    [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
 
@@ -183,6 +183,10 @@ private:
     TextureCache& texture_cache;
     VideoCore::ShaderNotify& shader_notify;
     bool use_asynchronous_shaders{};
+    /// What is left of this frame's Bounded wait budget for unbuilt native pipelines, and the
+    /// time spent waiting since the last log line.
+    s64 native_wait_budget_us{};
+    s64 native_wait_used_us{};
     bool use_vulkan_pipeline_cache{};
 
     GraphicsPipelineCacheKey graphics_key{};

@@ -1268,6 +1268,8 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
 
 void PipelineCache::TickFrame() {
     ++frame_count;
+    native_wait_budget_us =
+        static_cast<s64>(Settings::values.native_pipeline_wait_ms.GetValue()) * 1000;
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }
@@ -1345,19 +1347,67 @@ void PipelineCache::StopBackgroundPipelines() {
     background_workers.reset();
 }
 
-GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const noexcept {
+GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexcept {
     if (pipeline->IsBuilt()) {
         return pipeline;
     }
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
+    // EDEN_NX2_ASYNC_DISCARD=1 forces Skip for native draws, whatever the setting says.
+    static const bool discard_native = [] {
+        const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
+        return value != nullptr && value[0] == '1';
+    }();
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
-    const bool discard = CanDiscardPendingDraw(maxwell3d->GetNativeMacroEngine().native_turing,
-                                              maxwell3d->regs.zeta_enable != 0,
-                                              draw_state.draw_element_count,
-                                              draw_state.draw_element_count);
-    return discard ? nullptr : pipeline;
+    const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+    NativePendingMode mode = NativePendingMode::Wait;
+    if (native) {
+        switch (Settings::values.native_async_draws.GetValue()) {
+        case Settings::NativeAsyncDraws::Bounded:
+            mode = NativePendingMode::Bounded;
+            break;
+        case Settings::NativeAsyncDraws::Skip:
+            mode = NativePendingMode::Skip;
+            break;
+        default:
+            break;
+        }
+        if (discard_native) {
+            mode = NativePendingMode::Skip;
+        }
+    }
+    const bool can_discard = CanDiscardPendingDraw(
+        native, maxwell3d->regs.zeta_enable != 0, draw_state.draw_element_count,
+        draw_state.draw_element_count, native && mode != NativePendingMode::Wait);
+    if (!native) {
+        return can_discard ? nullptr : pipeline;
+    }
+    switch (DecideNativePending(mode, can_discard, native_wait_budget_us)) {
+    case NativeDrawAction::Wait:
+        return pipeline;
+    case NativeDrawAction::Skip:
+        return nullptr;
+    case NativeDrawAction::WaitTimed:
+        break;
+    }
+    const auto begin = std::chrono::steady_clock::now();
+    const bool built = pipeline->WaitBuilt(std::chrono::microseconds{native_wait_budget_us});
+    const s64 spent = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - begin)
+                          .count();
+    native_wait_budget_us -= spent;
+    native_wait_used_us += spent;
+    static auto window = std::chrono::steady_clock::now();
+    if (std::chrono::steady_clock::now() - window > std::chrono::seconds{10}) {
+        LOG_INFO(Render_Vulkan,
+                 "Bounded pipeline wait: {:.1f} ms spent in the last 10 s (budget {} ms per frame)",
+                 static_cast<double>(native_wait_used_us) / 1000.0,
+                 Settings::values.native_pipeline_wait_ms.GetValue());
+        native_wait_used_us = 0;
+        window = std::chrono::steady_clock::now();
+    }
+    return built ? pipeline : nullptr;
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(

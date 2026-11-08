@@ -163,6 +163,8 @@ ENUM(GameListMode, TreeView, GridView, CarouselView);
 ENUM(SpeedMode, Standard, Turbo, Slow);
 ENUM(FrameGenType, Lsfg, Fsr3);
 
+ENUM(NativeAsyncDraws, Wait, Bounded, Skip);
+
 template <typename Type>
 inline std::string_view CanonicalizeEnum(Type id) {
     const auto group = EnumMetadata<Type>::Canonicalizations();
