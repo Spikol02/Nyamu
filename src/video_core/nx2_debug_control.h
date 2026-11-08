@@ -28,6 +28,10 @@ inline std::atomic<int> g_experiments[ExperimentCount]{};
 
 inline void LoadExperiments() {
     static const bool loaded = [] {
+        // Kept experiments, on unless their variable says otherwise. EXP8 = 9 (bits 1 and 8 of
+        // Fritchii's 15; bits 2 and 4 aren't ported): cheaper texture uploads, Fritchii measured
+        // Hyrule Field 1% lows 30.3 -> 35.1 fps with all four.
+        g_experiments[8].store(9, std::memory_order_relaxed);
         for (int n = 0; n < ExperimentCount; ++n) {
             const std::string name = "EDEN_NX2_EXP" + std::to_string(n);
             if (const char* value = std::getenv(name.c_str())) {

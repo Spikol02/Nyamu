@@ -21,6 +21,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/kepler_compute.h"
@@ -461,8 +462,13 @@ void TextureCache<P>::TickFrame() {
     TickAsyncDecode();
     TickAsyncUnswizzle();
     if (frame_tick % 600 == 0 && !uploaded_ranges.empty()) {
-        for (const auto& [address, size] : uploaded_ranges) {
-            device_memory.HintCold(address, size);
+        // EDEN_NX2_EXP8 bit 8 (Fritchii): no cold hint. An image created again over cold memory
+        // (re-created after eviction, or a render target at a new size) faulted all of it back in
+        // while uploading.
+        if ((VideoCore::Nx2Debug::Experiment(8) & 8) == 0) {
+            for (const auto& [address, size] : uploaded_ranges) {
+                device_memory.HintCold(address, size);
+            }
         }
         uploaded_ranges.clear();
     }
