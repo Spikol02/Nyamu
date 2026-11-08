@@ -1373,7 +1373,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                     }
                     const auto pipeline =
                         CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), nullptr, false);
-                    return pipeline != nullptr && !pipeline->Failed();
+                    return pipeline != nullptr && pipeline->IsBuilt();
                 }});
             }
             return;
