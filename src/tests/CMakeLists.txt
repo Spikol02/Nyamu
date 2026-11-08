@@ -58,6 +58,7 @@ add_executable(tests
     video_core/async_draw_policy.cpp
     video_core/native_pending_policy.cpp
     video_core/pipeline_optimization.cpp
+    video_core/pipeline_cache_policy.cpp
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
     video_core/command_snapshot_suspensions.cpp
@@ -87,6 +88,7 @@ add_executable(tests
     video_core/ampere_matrix.cpp
     video_core/spirv_software_matrix.cpp
     video_core/spirv_builtin_capabilities.cpp
+    video_core/virtual_range_cache.cpp
     common/bit_field.cpp
     common/cityhash.cpp
     common/container_hash.cpp
