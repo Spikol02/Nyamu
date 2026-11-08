@@ -338,7 +338,7 @@ const char* StageTag(size_t index) {
     return index < 6 ? tags[index] : "xx";
 }
 
-size_t GetTotalPipelineWorkers() {
+size_t GetTotalPipelineWorkers(const Device& device) {
     const size_t logical_threads =
         std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL);
     const size_t max_core_threads = logical_threads - 1ULL;
@@ -347,6 +347,14 @@ size_t GetTotalPipelineWorkers() {
         if (parsed > 0) {
             return std::min<size_t>(static_cast<size_t>(parsed), max_core_threads);
         }
+    }
+    // AMD's legacy Polaris driver uses a lot of RAM per compile of a large Switch 2 shader, and
+    // one build per core is the likely cause of the RX 580 running out of RAM after the intro.
+    if (device.IsAmdLegacyGcn()) {
+        LOG_WARNING(Render_Vulkan,
+                    "AMD GCN4 or older: limiting pipeline build threads to 2 "
+                    "(EDEN_NX2_PIPELINE_WORKERS overrides)");
+        return std::min<size_t>(max_core_threads, 2ULL);
     }
 #ifdef __ANDROID__
     const int configured = AndroidSettings::values.pipeline_worker_count.GetValue();
@@ -422,7 +430,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue() &&
                                 !DriverCachesPipelines(device_)},
-      workers(device.HasBrokenParallelShaderCompiling() ? 1ULL : GetTotalPipelineWorkers(),
+      workers(device.HasBrokenParallelShaderCompiling() ? 1ULL : GetTotalPipelineWorkers(device),
               "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {},
                            Common::ThreadPlacement::Background) {
@@ -1220,6 +1228,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
     std::vector<std::pair<GraphicsPipelineCacheKey, std::vector<FileEnvironment>>> deferred_graphics;
+    size_t migrated_pipelines = 0;
+    size_t feature_mismatched_pipelines = 0;
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -1300,6 +1310,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 dynamic_features.has_color_write_enable ||
             (key.state.dynamic_vertex_input != 0) !=
                 dynamic_features.has_dynamic_vertex_input) {
+            ++feature_mismatched_pipelines;
             return;
         }
 
@@ -1314,11 +1325,23 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
 
+        // The key holds the driver version, so after a driver update no cached pipeline matched
+        // a draw again: each was built at boot for nothing, then built again in game and stored
+        // a second time. The cache holds guest shaders that are translated again for this driver
+        // either way, so an entry from another version of the same driver is taken as this one.
+        const u64 recorded_hash = key.Hash();
+        if (key.state.driver_id == dynamic_features.driver_id &&
+            key.state.driver_version != dynamic_features.driver_version &&
+            std::getenv("EDEN_NX2_KEEP_CACHE_DRIVER_VERSION") == nullptr) {
+            key.state.driver_version = dynamic_features.driver_version;
+            ++migrated_pipelines;
+        }
         const u64 hash = key.Hash();
         disk_pipelines.insert(hash);
         if (!PreloadAllPipelines() &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
-                                    : !used_pipelines.contains(hash))) {
+                                    : !used_pipelines.contains(hash) &&
+                                          !used_pipelines.contains(recorded_hash))) {
             ++skipped_pipelines;
             if (BackgroundPipelinesEnabled()) {
                 deferred_graphics.emplace_back(key, std::move(envs));
@@ -1356,6 +1379,19 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     compute_envs.clear();
 
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
+    if (feature_mismatched_pipelines != 0) {
+        LOG_WARNING(Render_Vulkan,
+                    "{} cached graphics pipelines were saved with other dynamic state features "
+                    "(another GPU or the extended/vertex input dynamic state settings) and are "
+                    "not loaded",
+                    feature_mismatched_pipelines);
+    }
+    if (migrated_pipelines != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "{} cached graphics pipelines were saved by another version of this driver and "
+                 "are used for this one",
+                 migrated_pipelines);
+    }
     if (skipped_pipelines != 0) {
         LOG_INFO(Render_Vulkan,
                  "{} cached graphics pipelines are built when first needed",
@@ -1564,6 +1600,12 @@ void PipelineCache::EvictUnusedPipelines() {
     // Building a pipeline again on MoltenVK means a Metal compile mid-game, far dearer than the
     // 2-3 ms below, so none are evicted there.
     if (device.IsMoltenVK()) {
+        return;
+    }
+    // EDEN_NX2_PRELOAD_ALL_PIPELINES asked for every cached pipeline built: evicting the ones not
+    // used yet threw the preload away after 9000 frames (Ocarina: 22,510 of 24,285, then rebuilt
+    // one by one in new places).
+    if (PreloadAllPipelines()) {
         return;
     }
     // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
@@ -2192,9 +2234,21 @@ vk::PipelineCache PipelineCache::LoadVulkanPipelineCache(const std::filesystem::
         file.read(cache_data.data(), cache_size);
 
         LOG_INFO(Render_Vulkan,
-                 "Loaded Vulkan driver pipeline cache: ", Common::FS::PathToUTF8String(filename));
+                 "Loaded Vulkan driver pipeline cache: {}", Common::FS::PathToUTF8String(filename));
 
-        return create_pipeline_cache(cache_size, cache_data.data());
+        try {
+            return create_pipeline_cache(cache_size, cache_data.data());
+        } catch (const vk::Exception& e) {
+            // The blob came from another driver or driver version (e.g. switching between
+            // MoltenVK and KosmicKrisp on macOS): the driver rejects it. Start empty instead of
+            // aborting, and drop the stale file so the next run doesn't retry it.
+            LOG_ERROR(Render_Vulkan,
+                      "Driver rejected the Vulkan pipeline cache file ({}), starting with an empty "
+                      "cache and deleting it",
+                      e.what());
+            Common::FS::RemoveFile(filename);
+            return create_pipeline_cache(0, nullptr);
+        }
 
     } catch (const std::ios_base::failure& e) {
         LOG_ERROR(Common_Filesystem, "{}", e.what());
