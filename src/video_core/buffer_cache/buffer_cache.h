@@ -1499,7 +1499,7 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, WrittenStorageMarkSize(size));
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -1646,8 +1646,7 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, WrittenStorageMarkSize(size),
-                              true);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, true);
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
