@@ -37,6 +37,43 @@
 
 namespace VideoCommon {
 
+u64 VertexAttributeMaskOf(const Shader::Environment& env) {
+    static const bool key_all = [] {
+        const char* value = std::getenv("EDEN_NX2_KEY_ALL_ATTRIBUTES");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (key_all) {
+        return ~u64{0};
+    }
+    const Shader::Stage stage{env.ShaderStage()};
+    if (stage == Shader::Stage::Task || stage == Shader::Stage::Mesh) {
+        // No vertex input (Ocarina of Time: 191 keys for 31 sets of shaders, split only by the
+        // attribute registers).
+        return 0;
+    }
+    if (stage != Shader::Stage::VertexB || !env.IsNativeProgram()) {
+        return ~u64{0};
+    }
+    // The hardware only fetches the attributes in the input map, so a read outside it is never
+    // valid (none of Ocarina of Time's 1,250 cached vertex programs makes one).
+    std::array<std::array<bool, 4>, Tegra::Engines::Maxwell3D::Regs::NumVertexAttributes>
+        input_generic{};
+    for (size_t index = 0; index < input_generic.size(); ++index) {
+        input_generic[index] = env.SPH().vtg.InputGeneric(index);
+    }
+    return VertexAttributeMask(input_generic);
+}
+
+u32 GenericReadMask(const Shader::ProgramHeader& sph) noexcept {
+    u32 mask = 0;
+    for (size_t index = 0; index < 32; ++index) {
+        if ((sph.vtg.imap_generic_vector[index >> 1] >> ((index % 2) * 4)) & 0xF) {
+            mask |= 1U << index;
+        }
+    }
+    return mask;
+}
+
 void ShaderCache::InvalidateRegion(VAddr addr, size_t size) {
     std::scoped_lock lock{invalidation_mutex};
     InvalidatePagesInRegion(addr, size);
@@ -488,6 +525,10 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
         info->size_bytes = env.ReadSizeBytes();
     }
     info->lowered_native = env.LoweredNative();
+    info->vertex_attribute_mask = VertexAttributeMaskOf(env);
+    if (env.IsNativeProgram() && env.ShaderStage() == Shader::Stage::VertexB) {
+        info->generic_read_mask = GenericReadMask(env.SPH());
+    }
     const size_t size_bytes{env.SourceSizeBytes() ? env.SourceSizeBytes() : info->size_bytes};
     const ShaderInfo* const result{info.get()};
     Register(std::move(info), cpu_addr, size_bytes);
