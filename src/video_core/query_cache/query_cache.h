@@ -296,6 +296,13 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     std::function<void()> operation([this, is_synced, free_on_run, new_query_id, streamer,
                                      query_base = query, query_location, pointer, pointer_timestamp,
                                      cpu_addr, addr, asid = gpu_memory->GetID(), counter_type] {
+        struct Settle {
+            DAddr address;
+            ~Settle() {
+                Tegra::g_nx2_async_reports_completed[Tegra::Nx2AsyncReportSlot(address)].fetch_add(
+                    1, std::memory_order_release);
+            }
+        } const settle{cpu_addr};
         const auto retire = [&] {
             if (free_on_run) {
                 std::scoped_lock lock(cache_mutex);
@@ -362,9 +369,13 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         // The fence carrying it must wait for the host GPU: a placeholder one runs the write as
         // soon as the fencing thread reaches it, possibly before the GPU finished.
         needs_real_fence.store(true, std::memory_order_relaxed);
+        Tegra::g_nx2_async_reports_issued[Tegra::Nx2AsyncReportSlot(cpu_addr)].fetch_add(
+            1, std::memory_order_release);
         impl->rasterizer.SyncOperation(std::move(operation));
         impl->rasterizer.SignalFence([] {});
     } else if (is_fence) {
+        Tegra::g_nx2_async_reports_issued[Tegra::Nx2AsyncReportSlot(cpu_addr)].fetch_add(
+            1, std::memory_order_release);
         impl->rasterizer.SignalFence(std::move(operation));
     } else {
         if (!Settings::IsGPULevelHigh() && counter_type == QueryType::Payload) {
@@ -388,6 +399,8 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             streamer->Free(new_query_id);
             return;
         }
+        Tegra::g_nx2_async_reports_issued[Tegra::Nx2AsyncReportSlot(cpu_addr)].fetch_add(
+            1, std::memory_order_release);
         impl->rasterizer.SyncOperation(std::move(operation));
     }
     if (is_synced) {
