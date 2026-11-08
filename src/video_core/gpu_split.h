@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -208,6 +210,7 @@ public:
     struct ReleaseLookup {
         std::optional<u32> value;
         ReleaseMiss miss{};
+        u64 position{}; ///< Where the release is queued (when value is set)
     };
     [[nodiscard]] ReleaseLookup QueuedRelease(u64 addr) const noexcept {
         if ((addr & 3) != 0) {
@@ -226,7 +229,30 @@ public:
         if (slot.position <= consumed.load(std::memory_order_acquire)) {
             return {std::nullopt, ReleaseMiss::Ran};
         }
-        return {slot.payload, ReleaseMiss::None};
+        return {slot.payload, ReleaseMiss::None, slot.position};
+    }
+    /// An acquire went on without waiting because the release queued at `position` meets it.
+    /// The guest takes the acquire to mean the GPU work before that release is done, so the
+    /// front's own reads of GPU-written memory (macro DMA reads, GPU-written command lists)
+    /// wait for the back to reach it: a 3D report release is sent after the work it guards, and
+    /// reading ahead of that work made Ocarina of Time's fountain flowers flicker.
+    /// EDEN_NX2_PREDICT_SYNC=0 goes on without that wait, as before.
+    void NotePredictedRelease(u64 position) noexcept {
+        if (PredictSyncEnabled()) {
+            predicted_release_position = std::max(predicted_release_position, position);
+            last_sync_position = std::max(last_sync_position, position);
+        }
+    }
+    /// Waits until the back ran the releases acquires were predicted to be met by.
+    bool WaitForPredictedReleases(DrainSite site) {
+        return WaitFor(std::min(predicted_release_position, write_position), site);
+    }
+    static bool PredictSyncEnabled() noexcept {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_PREDICT_SYNC");
+            return !(value && value[0] == '0');
+        }();
+        return enabled;
     }
     void NoteAnyRelease() noexcept {
         last_release_position = write_position;
@@ -306,6 +332,7 @@ private:
     u64 last_writer_position{};
     u64 last_sync_position{};
     u64 last_release_position{};
+    u64 predicted_release_position{};
     static constexpr size_t SemSlots = 1024;
     struct SemWrite {
         u64 granule{~u64{0}};

@@ -1245,6 +1245,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             VideoCommon::DrainSite::MacroDmaFlush);
     } else {
         split.WaitForSemaphore(source, VideoCommon::DrainSite::MacroDmaRead, read_bytes);
+        split.WaitForPredictedReleases(VideoCommon::DrainSite::MacroDmaRead);
     }
     // Buffer-cache writes mark their pages once run, and the marks never clear. Reads of pages no
     // GPU write ever reached (Ocarina's ~10,000 a second) need not wait for queued compute; only a
