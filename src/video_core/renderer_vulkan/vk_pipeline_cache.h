@@ -217,6 +217,7 @@ private:
     s64 native_wait_budget_us{};
     s64 native_wait_used_us{};
     bool use_vulkan_pipeline_cache{};
+    bool pipeline_binaries_enabled{};
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};

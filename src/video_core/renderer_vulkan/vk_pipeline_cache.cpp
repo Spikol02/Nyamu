@@ -744,6 +744,9 @@ PipelineCache::~PipelineCache() {
                                      CACHE_VERSION);
     }
     PipelineLibraryCache::Instance().Clear();
+    if (pipeline_binaries_enabled) {
+        device.GetLogical().DisablePipelineBinaryCache();
+    }
 }
 
 void PipelineCache::SaveUsedPipelines() {
@@ -1223,6 +1226,16 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                      Common::FS::PathToUTF8String(shared), Common::FS::PathToUTF8String(own),
                      error ? fmt::format(" (failed: {})", error.message()) : std::string{});
         }
+    }
+    // NVIDIA's driver already keeps every pipeline in its own disk cache, so saving binaries
+    // there would only duplicate it. Pipelines built from graphics pipeline library parts are
+    // not saved (the extension doesn't cover them).
+    if (Settings::values.use_vulkan_pipeline_binaries.GetValue() &&
+        device.IsKhrPipelineBinarySupported() &&
+        device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY) {
+        device.GetLogical().EnablePipelineBinaryCache(
+            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_binaries", CACHE_VERSION));
+        pipeline_binaries_enabled = true;
     }
     used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     used_pipelines_saved = std::chrono::steady_clock::now();
