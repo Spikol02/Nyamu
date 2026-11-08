@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <cstdlib>
+
 #include <utility>
 #include <vector>
 
@@ -21,8 +23,14 @@ public:
     void Add(GPUVAddr address, size_t size) noexcept {
         auto const end_address = start_address + accumulated_size;
         if (!(address >= start_address && address + size <= end_address)) {
+            // EDEN_NX2_INVALIDATE_BLOCKS=0: the old rounding, for comparisons.
+            static const bool whole_blocks = [] {
+                const char* value = std::getenv("EDEN_NX2_INVALIDATE_BLOCKS");
+                return value == nullptr || value[0] != '0';
+            }();
             const GPUVAddr first_block = address & atomicity_mask;
-            size = ((address + size + atomicity_size_mask) & atomicity_mask) - first_block;
+            size = ((address + size + atomicity_size_mask) & atomicity_mask) -
+                   (whole_blocks ? first_block : address);
             address = first_block;
             if (start_address == 0) {
                 start_address = address;
