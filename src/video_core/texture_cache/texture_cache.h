@@ -2867,7 +2867,12 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     // uploads took up to 17% of the GPU back thread there.
     size_t first_copy = 0;
     bool copied_whole = false;
-    for (size_t index = join_copies_to_do.size(); index-- > 0;) {
+    // EDEN_NX2_TC_JOIN_SKIP=0: always upload and run every copy, as before.
+    static const bool join_skip = [] {
+        const char* value = std::getenv("EDEN_NX2_TC_JOIN_SKIP");
+        return value == nullptr || value[0] != '0';
+    }();
+    for (size_t index = join_skip ? join_copies_to_do.size() : 0; index-- > 0;) {
         const AliasedImage* const aliased = alias_copy(join_copies_to_do[index]);
         if (aliased != nullptr && writes_whole_image(*aliased)) {
             first_copy = index;
