@@ -61,6 +61,7 @@ add_executable(tests
     video_core/pipeline_cache_policy.cpp
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
+    video_core/gpu_written_pages.cpp
     video_core/command_snapshot_suspensions.cpp
     video_core/pending_maps.cpp
     hid_core/sensor_info.cpp
