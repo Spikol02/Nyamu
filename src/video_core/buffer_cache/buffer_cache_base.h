@@ -659,9 +659,10 @@ private:
     /// much of the marked range the GPU really writes.
     u32 WrittenStorageMarkSize(u32 size) const {
         static const u64 cap = [] {
-            // 64 KiB by default, as Fritchii ships it; =0 marks the whole binding again.
+            // Off by default: with Fritchii's 64 KiB, Ocarina of Time's flowerbeds flickered (the
+            // culling lists past the cap went untracked).
             const char* value = std::getenv("EDEN_NX2_WRITTEN_SSBO_MARK_KIB");
-            return value == nullptr ? u64{64} * 1024 : std::strtoull(value, nullptr, 10) * 1024;
+            return value == nullptr ? u64{0} : std::strtoull(value, nullptr, 10) * 1024;
         }();
         if (cap == 0 || gpu_memory == nullptr || !gpu_memory->UsesNativeTiling()) {
             return size;
