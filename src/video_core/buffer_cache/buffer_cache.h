@@ -9,6 +9,7 @@
 #include "video_core/buffer_cache/uniform_cache_history.h"
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -128,9 +129,21 @@ void BufferCache<P>::TickFrame() {
         }
         std::partial_sort(largest.begin(), largest.begin() + std::min<size_t>(6, largest.size()),
                           largest.end(), std::greater<>{});
-        LOG_INFO(HW_GPU, "Buffer cache: {} buffers {} MiB; largest {}", count, total >> 20,
-                 fmt::join(largest.begin(), largest.begin() + std::min<size_t>(6, largest.size()), ", "));
+        u64 marked{};
+        size_t marked_ranges{};
+        preflush_marked.ForEach([&](DAddr lower, DAddr upper) {
+            marked += upper - lower;
+            ++marked_ranges;
+        });
+        LOG_INFO(HW_GPU,
+                 "Buffer cache: {} buffers {} MiB; largest {}; preflushable {} KiB in {} ranges, "
+                 "{} marks",
+                 count, total >> 20,
+                 fmt::join(largest.begin(), largest.begin() + std::min<size_t>(6, largest.size()), ", "),
+                 marked >> 10, marked_ranges, preflush_marks);
+        preflush_marks = 0;
     }
+    DecayPreflushMarks();
 
     // Calculate hits and shots and move hit bits to the right
     const u32 hits = std::reduce(channel_state->uniform_cache_hits.begin(),
@@ -246,6 +259,38 @@ bool BufferCache<P>::OnCPUWrite(DAddr device_addr, u64 size) {
 }
 
 template <class P>
+void BufferCache<P>::DecayPreflushMarks() {
+    // EDEN_NX2_PREFLUSH_DECAY_MS=<ms>: a Preflushable mark is never cleared, so a range the guest
+    // CPU read once is copied back at every fence after each GPU write, for good. Every <ms> the
+    // marks are cleared; ranges still read are marked again by their next read (one flush each).
+    static const u64 interval_ns = [] {
+        const char* value = std::getenv("EDEN_NX2_PREFLUSH_DECAY_MS");
+        return value == nullptr ? u64{0} : std::strtoull(value, nullptr, 10) * 1'000'000;
+    }();
+    if (interval_ns == 0 || preflush_marked.Empty()) {
+        return;
+    }
+    const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    if (preflush_decay_ns == 0) {
+        preflush_decay_ns = now;
+        return;
+    }
+    if (now - preflush_decay_ns < interval_ns) {
+        return;
+    }
+    preflush_decay_ns = now;
+    preflush_marked.ForEach([&](DAddr lower, DAddr upper) {
+        memory_tracker.UnmarkRegionAsPreflushable(lower, upper - lower);
+        // A trap set before the mark is still in the deduplication cache: forget it, so the next
+        // GPU write here arms the read trap again.
+        read_trapped_ranges.Subtract(lower, upper - lower);
+    });
+    preflush_marked.Clear();
+}
+
+template <class P>
 std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DAddr device_addr,
                                                                               u64 size) {
     std::optional<VideoCore::RasterizerDownloadArea> area{};
@@ -271,6 +316,9 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         if (preflush) {
             memory_tracker.MarkRegionAsPreflushable(
                 device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
+            preflush_marked.Add(device_addr_start_aligned,
+                                device_addr_end_aligned - device_addr_start_aligned);
+            ++preflush_marks;
         } else {
             if constexpr (USE_MEMORY_MAPS) {
                 cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);

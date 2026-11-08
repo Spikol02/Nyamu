@@ -35,12 +35,15 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     }
     const u64 last = std::min<u64>((device_address + size - 1) >> Nx2WrittenPageBits,
                                    g_nx2_gpu_written_pages.size() * 64 - 1);
-    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last; ++page) {
+    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last;) {
+        const u64 first_bit = page % 64;
+        const u64 bits = std::min<u64>(64 - first_bit, last - page + 1);
+        const u64 mask = (bits == 64 ? ~u64{0} : (u64{1} << bits) - 1) << first_bit;
         auto& word = g_nx2_gpu_written_pages[page / 64];
-        const u64 bit = u64{1} << (page % 64);
-        if ((word.load(std::memory_order_relaxed) & bit) == 0) {
-            word.fetch_or(bit, std::memory_order_relaxed);
+        if ((word.load(std::memory_order_relaxed) & mask) != mask) {
+            word.fetch_or(mask, std::memory_order_relaxed);
         }
+        page += bits;
     }
 }
 
@@ -121,6 +124,26 @@ inline void Nx2ClearGpuWrittenPages() {
         return false;
     }
     return (g_nx2_gpu_written_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1;
+}
+
+/// False only when no page of [device_address, device_address + size) has been GPU-written.
+/// Every range the buffer cache records as GPU-modified also marks its pages here, under its
+/// lock, so this answers MustFlushRegion without taking it. Ranges past the bitmap answer true.
+[[nodiscard]] inline bool Nx2MayBeGpuWritten(u64 device_address, u64 size) {
+    if (size == 0) {
+        return false;
+    }
+    const u64 first = device_address >> Nx2WrittenPageBits;
+    const u64 last = (device_address + size - 1) >> Nx2WrittenPageBits;
+    if (last < first || last >= g_nx2_gpu_written_pages.size() * 64) {
+        return true;
+    }
+    for (u64 page = first; page <= last; ++page) {
+        if ((g_nx2_gpu_written_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1) {
+            return true;
+        }
+    }
+    return false;
 }
 
 inline constexpr size_t Nx2MaxSemaphoreRegions = 32;

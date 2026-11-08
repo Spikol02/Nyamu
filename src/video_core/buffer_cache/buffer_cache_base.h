@@ -767,6 +767,11 @@ private:
     std::vector<MultiRangeSegment> graphics_segments;
     std::vector<MultiRangeSegment> compute_segments;
     u64 frame_tick = 0;
+    /// Ranges marked Preflushable since the last EDEN_NX2_PREFLUSH_DECAY_MS clear, and how many
+    /// marks were made in the current buffer cache log window.
+    Common::RangeSet<DAddr> preflush_marked;
+    u64 preflush_marks = 0;
+    u64 preflush_decay_ns = 0;
     /// EDEN_NX2_TABLE_POINTER_TRACE: last table entry and size bound per table pointer slot.
     std::unordered_map<u64, std::pair<GPUVAddr, u32>> traced_table_pointers;
     u64 total_used_memory = 0;
