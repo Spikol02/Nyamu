@@ -598,10 +598,6 @@ struct Values {
     SwitchableSetting<bool> use_disk_shader_cache{linkage, true, "use_disk_shader_cache",
                                                   Category::RendererAdvanced};
 
-    SwitchableSetting<bool> use_vulkan_driver_pipeline_cache{
-        linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
-        Specialization::Default};
-
     // Precache shaders before the game starts: the compute programs in the game files and the
     // cached graphics pipelines the boot leaves for later are built on the loading screen, so the
     // driver's cache holds them before the game first uses them.
@@ -614,6 +610,10 @@ struct Values {
                                                         Specialization::Default,
                                                         true,
                                                         true};
+
+    SwitchableSetting<bool> use_vulkan_driver_pipeline_cache{
+        linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
+        Specialization::Default};
 
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};

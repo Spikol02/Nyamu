@@ -284,10 +284,6 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "Increasing this can improve throughput on high-end GPUs but may cause TDR or driver "
               "timeouts on weaker hardware."));
 
-    INSERT(Settings, use_vulkan_driver_pipeline_cache, tr("Use Vulkan pipeline cache"),
-           tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
-              "time significantly in cases where the Vulkan driver does not store pipeline cache "
-              "files internally."));
     INSERT(Settings, precache_shaders, tr("Precache shaders before game start:"),
            tr("Builds shaders on the loading screen, on every CPU thread, so they don't stutter "
               "the first time the game uses them: the compute shaders found in the game files, "
@@ -296,6 +292,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "later launches only build what is new, until the GPU driver changes. The loading "
               "screen has a Skip button.\nAsk asks at launch while the game has never been "
               "precached."));
+    INSERT(Settings, use_vulkan_driver_pipeline_cache, tr("Use Vulkan pipeline cache"),
+           tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
+              "time significantly in cases where the Vulkan driver does not store pipeline cache "
+              "files internally."));
     INSERT(Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
            tr("Required by some games.\nThis setting only exists for Intel "
               "proprietary drivers and may crash if enabled.\nCompute pipelines are always enabled "
