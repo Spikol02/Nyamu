@@ -277,6 +277,9 @@ public:
 
     bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer);
 
+    /// EDEN_NX2_PREFLUSH_DECAY_MS: clears the Preflushable marks periodically (TickFrame).
+    void DecayPreflushMarks();
+
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size);
 
     void DisableGraphicsUniformBuffer(size_t stage, u32 index);
