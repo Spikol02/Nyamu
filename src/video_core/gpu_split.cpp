@@ -114,9 +114,10 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
     static const bool switches_read = [] {
+        // On unless set to 0, as Fritchii ships them.
         const auto on = [](const char* name) {
             const char* value = std::getenv(name);
-            return value != nullptr && value[0] != '0';
+            return value == nullptr || value[0] != '0';
         };
         macro_sink = on("EDEN_NX2_MACRO_SINK");
         compute_sink = on("EDEN_NX2_COMPUTE_SINK");
