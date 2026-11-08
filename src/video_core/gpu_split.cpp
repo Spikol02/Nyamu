@@ -113,6 +113,18 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
+    static const bool switches_read = [] {
+        // On unless set to 0, as Fritchii ships them.
+        const auto on = [](const char* name) {
+            const char* value = std::getenv(name);
+            return value == nullptr || value[0] != '0';
+        };
+        macro_sink = on("EDEN_NX2_MACRO_SINK");
+        compute_sink = on("EDEN_NX2_COMPUTE_SINK");
+        ring_pairs = on("EDEN_NX2_RING_PAIRS");
+        return true;
+    }();
+    (void)switches_read;
     ring = std::make_unique<u64[]>(RingWords);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -149,6 +161,8 @@ void GpuSplit::Stop() {
     consumed_cache = 0;
     publish_every = PublishEvery;
     front_engine = nullptr;
+    pairs_header = nullptr;
+    pairs_count = 0;
     back_engine = nullptr;
     front_macros = false;
     published.store(0, std::memory_order_relaxed);
@@ -180,6 +194,8 @@ void GpuSplit::WaitForSpace(size_t words) {
 }
 
 void GpuSplit::Publish() {
+    // The back may read what is published: the open Pairs block is final from here on.
+    pairs_header = nullptr;
     if (published_local == write_position) {
         return;
     }
@@ -190,6 +206,33 @@ void GpuSplit::Publish() {
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
+    if ((macro_sink || compute_sink || ring_pairs) && (++publishes & 1023) == 0) [[unlikely]] {
+        ReportBatched();
+    }
+}
+
+void GpuSplit::ReportBatched() {
+    const auto now = std::chrono::steady_clock::now();
+    if (batched_since == std::chrono::steady_clock::time_point{}) {
+        batched_since = now;
+        batched.fill(0);
+        return;
+    }
+    const std::chrono::duration<double> elapsed = now - batched_since;
+    if (elapsed.count() < 10.0) {
+        return;
+    }
+    const auto rate = [&](Batched counter) {
+        return static_cast<double>(batched[static_cast<size_t>(counter)]) / elapsed.count();
+    };
+    LOG_INFO(HW_GPU,
+             "GPU split batched writes per second: split_batch.macro_sunk {:.0f}, "
+             "split_batch.compute_sunk {:.0f}, split_batch.compute_same {:.0f}, "
+             "split_batch.pairs {:.0f} in split_batch.pair_blocks {:.0f}",
+             rate(Batched::MacroSunk), rate(Batched::ComputeSunk), rate(Batched::ComputeSame),
+             rate(Batched::Pairs), rate(Batched::PairBlocks));
+    batched.fill(0);
+    batched_since = now;
 }
 
 void GpuSplit::Drain(DrainSite site) {
@@ -383,6 +426,9 @@ size_t GpuSplit::Execute(const u64* entry) {
             Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
             engine->ConsumeSink(*system);
             engine->CallMethod(*system, method, argument, true);
+        } else if ((head & Sink) != 0) {
+            engine->method_sink.emplace_back(
+                method | Tegra::Engines::EngineInterface::SplitPlainTag, argument);
         } else if (!engine->execution_mask[method]) {
             engine->method_sink.emplace_back(method, argument);
         } else {
@@ -413,6 +459,16 @@ size_t GpuSplit::Execute(const u64* entry) {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
         reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
         return 2 + payload;
+    }
+    case Kind::Pairs: {
+        // EDEN_NX2_RING_PAIRS: one profiler scope and one call for the block; the sink first,
+        // as for any other write, to keep the order.
+        const u32 count = static_cast<u32>(head >> 32);
+        auto* const engine = back_engine;
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        engine->ConsumeSink(*system);
+        engine->ApplyPairs(*system, entry + 1, count);
+        return 1 + size_t{count};
     }
     }
     return 1;
