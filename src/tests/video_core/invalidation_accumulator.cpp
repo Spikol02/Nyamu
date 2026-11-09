@@ -18,13 +18,13 @@ std::vector<std::pair<GPUVAddr, size_t>> Ranges(VideoCommon::InvalidationAccumul
 
 } // namespace
 
-TEST_CASE("A word past its block's start invalidates the whole block", "[invalidation_accumulator]") {
+TEST_CASE("A word past its block's start invalidates exactly that word", "[invalidation_accumulator]") {
     VideoCommon::InvalidationAccumulator accumulator;
     accumulator.Add(0x1054, 4);
     const auto ranges = Ranges(accumulator);
     REQUIRE(ranges.size() == 1);
-    CHECK(ranges[0].first == 0x1040);
-    CHECK(ranges[0].second == 0x20);
+    CHECK(ranges[0].first == 0x1054);
+    CHECK(ranges[0].second == 4);
 }
 
 TEST_CASE("Words written from mid-block on are all invalidated", "[invalidation_accumulator]") {
@@ -34,15 +34,15 @@ TEST_CASE("Words written from mid-block on are all invalidated", "[invalidation_
     }
     const auto ranges = Ranges(accumulator);
     REQUIRE(ranges.size() == 1);
-    CHECK(ranges[0].first == 0x2040);
-    CHECK(ranges[0].second == 0x60);
+    CHECK(ranges[0].first == 0x2054);
+    CHECK(ranges[0].second == 0x30);
 }
 
-TEST_CASE("A write spanning blocks covers each block it touches", "[invalidation_accumulator]") {
+TEST_CASE("A write spanning blocks is invalidated exactly", "[invalidation_accumulator]") {
     VideoCommon::InvalidationAccumulator accumulator;
     accumulator.Add(0x3018, 0x30);
     const auto ranges = Ranges(accumulator);
     REQUIRE(ranges.size() == 1);
-    CHECK(ranges[0].first == 0x3000);
-    CHECK(ranges[0].second == 0x60);
+    CHECK(ranges[0].first == 0x3018);
+    CHECK(ranges[0].second == 0x30);
 }

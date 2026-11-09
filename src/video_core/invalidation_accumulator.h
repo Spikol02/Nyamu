@@ -23,15 +23,20 @@ public:
     void Add(GPUVAddr address, size_t size) noexcept {
         auto const end_address = start_address + accumulated_size;
         if (!(address >= start_address && address + size <= end_address)) {
-            // EDEN_NX2_INVALIDATE_BLOCKS=0: the old rounding, for comparisons.
-            static const bool whole_blocks = [] {
+            // EDEN_NX2_INVALIDATE_BLOCKS: 2 (default) the written bytes exactly, 1 whole 32-byte
+            // blocks (zortos293/Lichii#700), 0 the old rounding (for comparisons).
+            static const int mode = [] {
                 const char* value = std::getenv("EDEN_NX2_INVALIDATE_BLOCKS");
-                return value == nullptr || value[0] != '0';
+                return value == nullptr ? 2 : std::atoi(value);
             }();
-            const GPUVAddr first_block = address & atomicity_mask;
-            size = ((address + size + atomicity_size_mask) & atomicity_mask) -
-                   (whole_blocks ? first_block : address);
-            address = first_block;
+            if (mode == 1) {
+                const GPUVAddr first_block = address & atomicity_mask;
+                size = ((address + size + atomicity_size_mask) & atomicity_mask) - first_block;
+                address = first_block;
+            } else if (mode == 0) {
+                size = ((address + size + atomicity_size_mask) & atomicity_mask) - address;
+                address = address & atomicity_mask;
+            }
             if (start_address == 0) {
                 start_address = address;
                 accumulated_size = size;
@@ -61,9 +66,12 @@ public:
     }
 
 private:
-    // A range runs from the start of the first 32-byte block a write touches to the end of the
-    // last one. The size used to be taken before the address was aligned down, so a write past
-    // its block's start got a range ending short of it (a lone word at 0x54 gave [0x40, 0x4c)).
+    // The old rounding took a write's size before aligning its address down, so a write past its
+    // block's start got a range ending short of it (a lone word at 0x54 gave [0x40, 0x4c)).
+    // Whole blocks (#700) cover the write but reach bytes it didn't write, and where those hold GPU
+    // data not yet in guest memory (preflush), the invalidation reloads stale guest bytes over
+    // it (Fritchii v5.1: glowing geometry in Hyrule Field). The default invalidates the written
+    // bytes only.
     static constexpr size_t atomicity_bits = 5;
     static constexpr size_t atomicity_size = 1ULL << atomicity_bits;
     static constexpr size_t atomicity_size_mask = atomicity_size - 1;
