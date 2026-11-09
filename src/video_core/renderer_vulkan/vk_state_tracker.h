@@ -97,6 +97,12 @@ public:
         (*flags)[Dirty::Scissors] = true;
     }
 
+    /// The dynamic colour write mask depends on the bound pipeline's fragment outputs too.
+    void InvalidateColorMask() {
+        (*flags)[Dirty::Blending] = true;
+        (*flags)[Dirty::ColorMask] = true;
+    }
+
     void InvalidateStateEnableFlag() {
         (*flags)[Dirty::StateEnable] = true;
     }
