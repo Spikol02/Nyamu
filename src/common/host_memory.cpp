@@ -128,11 +128,13 @@ static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn
 }
 
 namespace {
-/// EDEN_NX2_SEC_RESERVE=1 (off by default): the guest memory section is created reserved, and
-/// HostMemory::Commit commits its pages as the kernel hands them out (see host_memory.h).
+/// EDEN_NX2_SEC_RESERVE (on unless 0): the guest memory section is created reserved, and
+/// HostMemory::Commit commits its pages as the kernel hands them out (see host_memory.h). On by
+/// default as in Fritchii v5 and AMD Superior build 9: committing all 14 GiB at boot left 16 GB
+/// PCs out of commit (error 1455) loading a save.
 bool ReserveGuestMemory() {
     const char* value = std::getenv("EDEN_NX2_SEC_RESERVE");
-    return value != nullptr && value[0] == '1';
+    return value == nullptr || value[0] != '0';
 }
 
 /// The views of a reserved section, for ReservedPageHandler.
