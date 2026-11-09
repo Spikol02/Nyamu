@@ -247,6 +247,14 @@ private:
     std::array<bool, 8> fragment_writes_color{};
     bool writes_storage{};
 
+public:
+    /// Whether a stage writes storage buffers or images (its draws change memory).
+    [[nodiscard]] bool WritesStorage() const noexcept {
+        return writes_storage;
+    }
+
+private:
+
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;
     vk::PipelineLayout pipeline_layout;

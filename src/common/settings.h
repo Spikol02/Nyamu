@@ -697,7 +697,7 @@ struct Values {
     // What a Switch 2 draw does when its graphics pipeline is still building (asynchronous
     // shaders on): Wait for it, Skip it, or wait up to native_pipeline_wait_ms per frame (Bounded).
     SwitchableSetting<NativeAsyncDraws> native_async_draws{linkage,
-                                                           NativeAsyncDraws::Bounded,
+                                                           NativeAsyncDraws::Transient,
                                                            "native_async_draws",
                                                            Category::RendererHacks,
                                                            Specialization::Default,

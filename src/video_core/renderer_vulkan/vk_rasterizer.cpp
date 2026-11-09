@@ -398,6 +398,32 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         TraceRenderState(is_indexed, "no-pipeline", nullptr);
         return;
     }
+    if (!pipeline->IsBuilt() && pipeline_cache.SkipsUnbuiltTransientDraws() &&
+        (pipeline->WritesStorage() || maxwell3d->regs.transform_feedback_enabled != 0)) {
+        pipeline_cache.CountUnbuiltHeld(4);
+    } else if (!pipeline->IsBuilt() && pipeline_cache.SkipsUnbuiltTransientDraws()) {
+        // A native draw whose pipeline is still building, into render targets that are cleared
+        // and drawn again every frame: skip it for now instead of holding every later command
+        // until the driver finishes (shader compilation stutter). Draws into images that persist
+        // (HUD and text atlases, history buffers) or that write memory still wait: skipping
+        // those once left Ocarina's item labels missing for good.
+        int reason = 0;
+        {
+            std::scoped_lock lock{texture_cache.mutex};
+            texture_cache.UpdateRenderTargets(false);
+            reason = texture_cache.RenderTargetsRedrawnReason();
+        }
+        const bool redrawn = reason == 0;
+        if (!redrawn) {
+            pipeline_cache.CountUnbuiltHeld(reason);
+        }
+        if (redrawn) {
+            pipeline_cache.CountTransientSkip();
+            TraceRenderState(is_indexed, "unbuilt-transient", nullptr);
+            submitted = true;
+            return;
+        }
+    }
     if (VideoCommon::OotNetwork::BypassEnabled(Settings::GetCurrentProgramID())) {
         TrackOotTonemappedImage(*pipeline);
     }
@@ -1145,6 +1171,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 
     std::scoped_lock lock{texture_cache.mutex};
     texture_cache.UpdateRenderTargets(true);
+    texture_cache.NoteRenderTargetsCleared(use_color, use_depth || use_stencil);
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
     if (frame_dump.Capturing()) {
         FrameDumpPass(framebuffer);

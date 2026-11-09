@@ -173,6 +173,17 @@ private:
 
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
 
+public:
+    /// Whether the rasterizer skips the current native draw while its pipeline builds when its
+    /// render targets are redrawn every frame (native_async_draws Transient, asynchronous shaders).
+    [[nodiscard]] bool SkipsUnbuiltTransientDraws() const noexcept;
+    /// Counts a draw skipped that way, for the runtime pipeline log.
+    void CountTransientSkip() noexcept;
+    /// Counts a native draw that waits for its pipeline, by reason (see the runtime pipeline log).
+    void CountUnbuiltHeld(int reason) noexcept;
+
+private:
+
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(

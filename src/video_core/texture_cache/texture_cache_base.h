@@ -289,6 +289,16 @@ public:
         return render_targets;
     }
 
+    /// A clear of the bound render targets (UpdateRenderTargets(true) first): records the frame
+    /// on the images it fully clears.
+    void NoteRenderTargetsCleared(bool color, bool depth);
+
+    /// Whether the bound render targets are redrawn every frame (all fully cleared in this frame
+    /// and the one before), so a draw into them may be skipped once: 0 when they are, 1 none bound,
+    /// 2 one was not fully cleared in this frame, 3 one was cleared in this frame but not the one
+    /// before (for the runtime pipeline log).
+    [[nodiscard]] int RenderTargetsRedrawnReason();
+
     /// Mark images in a range as modified from the CPU
     void WriteMemory(DAddr cpu_addr, size_t size);
 
