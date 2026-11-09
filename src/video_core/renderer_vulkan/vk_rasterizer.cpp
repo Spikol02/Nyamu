@@ -468,6 +468,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
     }
 
+    if (const u32 written = pipeline->ColorTargetsWritten(); written != color_targets_written) {
+        color_targets_written = written;
+        state_tracker.InvalidateColorMask();
+    }
     {
         Profile::Scope scope{Profile::Zone::DynamicState};
         UpdateDynamicStates();
@@ -2996,6 +3000,11 @@ void RasterizerVulkan::UpdateBlending(Tegra::Engines::Maxwell3D::Regs& regs) {
             }
             if (mask.A) {
                 current |= VK_COLOR_COMPONENT_A_BIT;
+            }
+            // As the pipeline's static mask: a target the fragment shader doesn't write keeps
+            // its contents (the dynamic mask replaces the static one).
+            if ((color_targets_written & (1u << index)) == 0) {
+                current = 0;
             }
         }
         scheduler.Record([setup_masks](vk::CommandBuffer cmdbuf) {

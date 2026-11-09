@@ -273,6 +273,10 @@ private:
     u32 draw_counter = 0;
     u64 render_trace_frame = 0;
     u32 render_trace_draws = 0;
+    /// ColorTargetsWritten of the pipeline the dynamic colour write mask was last recorded for:
+    /// targets its fragment shader doesn't write get no components (Lichii #353; AMD writes
+    /// garbage to them otherwise).
+    u32 color_targets_written = ~0U;
     u32 render_trace_clears = 0;
     bool pending_native_work{};
     bool mesh_draw{}; ///< the draw being prepared uses a task/mesh pipeline

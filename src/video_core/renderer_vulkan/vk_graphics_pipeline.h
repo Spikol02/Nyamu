@@ -167,6 +167,15 @@ public:
         transitions.clear();
     }
 
+    /// One bit per render target whose colour the fragment shader writes.
+    [[nodiscard]] u32 ColorTargetsWritten() const noexcept {
+        u32 mask = 0;
+        for (size_t index = 0; index < fragment_writes_color.size(); ++index) {
+            mask |= fragment_writes_color[index] ? 1u << index : 0u;
+        }
+        return mask;
+    }
+
     [[nodiscard]] bool IsBuilt() const noexcept {
         return is_built.load(std::memory_order::relaxed);
     }
