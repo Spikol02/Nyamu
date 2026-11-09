@@ -41,20 +41,12 @@ struct ShaderInfo {
     size_t size_bytes{};
     /// Lowered code of a native program, reused when its pipelines are built.
     std::shared_ptr<const LoweredNativeCode> lowered_native;
-    /// Generic inputs a native vertex program reads (its header's input map), two bits per
-    /// attribute as in FixedPipelineState::attribute_types. None for task and mesh programs, all
-    /// set for any other program.
-    u64 vertex_attribute_mask{~u64{0}};
     /// Native vertex programs: the generic attributes their header says they read (#895).
     u32 generic_read_mask{~0U};
 };
 
 /// Generic attributes a vertex program's header says it reads (any component of each).
 u32 GenericReadMask(const Shader::ProgramHeader& sph) noexcept;
-
-/// ShaderInfo::vertex_attribute_mask of the program in `env` (a runtime or a disk environment).
-/// EDEN_NX2_KEY_ALL_ATTRIBUTES=1 keeps every attribute type in the keys, as before.
-[[nodiscard]] u64 VertexAttributeMaskOf(const Shader::Environment& env);
 
 class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelInfo> {
     static constexpr u64 YUZU_PAGEBITS = 14;
