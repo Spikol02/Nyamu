@@ -14,6 +14,7 @@
 #include "common/logging.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vma.h"
+#include "video_core/vulkan_common/pipeline_build_trace.h"
 #include "video_core/vulkan_common/vulkan_pipeline_binary_cache.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -783,9 +784,14 @@ PipelineLayout Device::CreatePipelineLayout(const VkPipelineLayoutCreateInfo& ci
 Pipeline Device::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci, VkPipelineCache cache) const {
     VkPipeline object = VK_NULL_HANDLE;
     VkResult result;
-    if (!PipelineBinaryCache::CreateGraphicsPipeline(handle, *dld, ci, cache, &object, &result)) {
-        result = dld->vkCreateGraphicsPipelines(handle, cache, 1, &ci, nullptr, &object);
-    }
+    result = PipelineBuildTrace::Traced("vkCreateGraphicsPipelines", ci.flags, [&] {
+        VkResult traced_result;
+        if (!PipelineBinaryCache::CreateGraphicsPipeline(handle, *dld, ci, cache, &object,
+                                                         &traced_result)) {
+            traced_result = dld->vkCreateGraphicsPipelines(handle, cache, 1, &ci, nullptr, &object);
+        }
+        return traced_result;
+    });
     // Adreno 5xx drivers do not properly return when a graphics pipeline fails to be created
     // Some (unkown) Mali drivers also do not properly return
     // This result code is out of spec, but should be handled as "kinda working"
@@ -799,9 +805,14 @@ Pipeline Device::CreateComputePipeline(const VkComputePipelineCreateInfo& ci,
                                        VkPipelineCache cache) const {
     VkPipeline object = VK_NULL_HANDLE;
     VkResult result;
-    if (!PipelineBinaryCache::CreateComputePipeline(handle, *dld, ci, cache, &object, &result)) {
-        result = dld->vkCreateComputePipelines(handle, cache, 1, &ci, nullptr, &object);
-    }
+    result = PipelineBuildTrace::Traced("vkCreateComputePipelines", ci.flags, [&] {
+        VkResult traced_result;
+        if (!PipelineBinaryCache::CreateComputePipeline(handle, *dld, ci, cache, &object,
+                                                        &traced_result)) {
+            traced_result = dld->vkCreateComputePipelines(handle, cache, 1, &ci, nullptr, &object);
+        }
+        return traced_result;
+    });
     Check(result);
     return Pipeline(object, handle, *dld);
 }

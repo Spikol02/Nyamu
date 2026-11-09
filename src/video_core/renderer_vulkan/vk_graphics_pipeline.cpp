@@ -16,6 +16,7 @@
 #include <fmt/format.h>
 
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/vulkan_common/pipeline_build_trace.h"
 
 #include "common/bit_field.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
@@ -883,6 +884,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     if (IsMeshPipeline() && !device.IsExtMeshShaderSupported()) {
         return;
     }
+    const PipelineBuildTrace::Scope build_trace{"graphics", key.Hash(), key.unique_hashes};
     FixedPipelineState::DynamicState dynamic{};
     if (!key.state.extended_dynamic_state) {
         dynamic = key.state.dynamic_state;
@@ -1577,7 +1579,9 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 task->job =
                     [weak_task = std::weak_ptr<PipelineOptimizeTask>{task}, link_parts, num_parts, flags,
                      layout = *pipeline_layout, &device = device, cache = *pipeline_cache,
-                     label = label()] {
+                     label = label(), trace_key = key.Hash(), trace_stages = key.unique_hashes] {
+                        const PipelineBuildTrace::Scope build_trace{"graphics-optimize", trace_key,
+                                                                    trace_stages};
                         const std::shared_ptr<PipelineOptimizeTask> task = weak_task.lock();
                         if (!task) {
                             return;

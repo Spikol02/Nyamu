@@ -14,6 +14,7 @@
 #include <fmt/format.h>
 
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/vulkan_common/pipeline_build_trace.h"
 #include "video_core/renderer_vulkan/pipeline_compile_trace.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -296,6 +297,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             CompileTrace::CompileScope trace_scope{
                 "compute", CompileTrace::Enabled() ? fmt::format("cs={:016x}", shader_hash)
                                                    : std::string{}};
+            const PipelineBuildTrace::Scope build_trace{"compute", shader_hash, {shader_hash}};
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
         } catch (const vk::Exception& exception) {
             LOG_CRITICAL(Render_Vulkan, "Adreno rejected compute shader {:016X}: {}", shader_hash,
