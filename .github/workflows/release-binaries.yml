@@ -227,6 +227,7 @@ jobs:
             -DBUILD_TESTING=OFF
             -DYUZU_TESTS=OFF
             -DYUZU_CMD=OFF
+            -DNYAMU_NX_CONVERTER=OFF
             -DYUZU_ROOM=OFF
             -DYUZU_ROOM_STANDALONE=OFF
             -DYUZU_USE_BUNDLED_QT=OFF
