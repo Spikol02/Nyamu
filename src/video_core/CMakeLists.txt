@@ -251,6 +251,7 @@ add_library(video_core STATIC
     vulkan_common/vulkan_surface.cpp
     vulkan_common/vulkan_surface.h
     vulkan_common/vulkan_pipeline_binary_cache.cpp
+    vulkan_common/pipeline_build_trace.h
     vulkan_common/vulkan_pipeline_binary_cache.h
     vulkan_common/vulkan_wrapper.cpp
     vulkan_common/vulkan_wrapper.h

@@ -55,6 +55,7 @@ Use these before guessing. All are off unless the variable is set; set them in t
 | Split GPU thread races | `EDEN_NX2_SPLIT_CHECK=1` | Reports scheduler use from the wrong thread. |
 | Upscaler and DLSS contracts | `EDEN_NX2_DLSS_CONTRACT_TRACE=1` | Inputs and outputs of replaced upscaler networks. |
 | Service calls | `EDEN_NX2_IPC_TRACE=1` | IPC command trace. |
+| Driver crash or hang while building shaders | `EDEN_NX2_PIPELINE_BUILD_TRACE=<file>` | A flushed `BEGIN`/`END` line around every driver pipeline build with the pipeline and stage hashes (`END` adds `ms=`). The last `BEGIN` without an `END` names the shaders the driver crashed or hung on. |
 | Host crash (log just stops) | Windows minidump in `%LOCALAPPDATA%\CrashDumps\nyamu.exe.<pid>.dmp` | Read the exception and stack with the `minidump` Python package, then symbolize with `llvm-symbolizer --obj=nyamu.exe --inlines --relative-address <offset>` next to the build's `nyamu.pdb`. |
 
 ## How work is split
