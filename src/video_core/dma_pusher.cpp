@@ -45,6 +45,18 @@ DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Cont
 
 DmaPusher::~DmaPusher() = default;
 
+namespace {
+/// EDEN_NX2_LIST_SUSPEND=0: a command list the GPU is still copying is waited for on the spot, as
+/// before zortos293/Lichii#752 (A/B).
+bool ListSuspendEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_LIST_SUSPEND");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+} // Anonymous namespace
+
 bool DmaPusher::CanResumeAcquire() {
     if (pending_list_tick) {
         return rasterizer->IsGpuTickDone(*pending_list_tick);
@@ -266,7 +278,7 @@ bool DmaPusher::Step() {
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else if (bool pending = false;
                    ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size),
-                                          &pending) ||
+                                          ListSuspendEnabled() ? &pending : nullptr) ||
                    pending) {
             if (pending) {
                 // Parsed again once the GPU copied the list; other channels run meanwhile.

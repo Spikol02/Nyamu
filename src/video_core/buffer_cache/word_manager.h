@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <bit>
 #include <limits>
 #include <span>
@@ -35,6 +36,16 @@ enum class Type {
 };
 
 template <class DeviceTracker, size_t stack_words, size_t size_bytes>
+/// EDEN_NX2_SKIP_UNCHANGED_WORDS=0: ForEachModifiedRange processes words with nothing modified
+/// as before zortos293's clean-bind skip (A/B).
+inline bool SkipUnchangedWords() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_SKIP_UNCHANGED_WORDS");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
 struct WordManager {
     static constexpr size_t num_words = Common::DivCeil(size_bytes, BYTES_PER_WORD);
 
@@ -191,7 +202,7 @@ struct WordManager {
             if (type == Type::GPU)
                 mask &= ~untracked_words[index];
             const u64 word = state_words[index] & mask;
-            if (word == 0 &&
+            if (word == 0 && SkipUnchangedWords() &&
                 (!clear || ((type != Type::CPU && type != Type::CachedCPU) ||
                             (untracked_words[index] & mask) == 0))) {
                 return;
