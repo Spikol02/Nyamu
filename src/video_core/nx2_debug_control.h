@@ -32,6 +32,10 @@ inline void LoadExperiments() {
         // Fritchii's 15; bits 2 and 4 aren't ported): cheaper texture uploads, Fritchii measured
         // Hyrule Field 1% lows 30.3 -> 35.1 fps with all four.
         g_experiments[8].store(9, std::memory_order_relaxed);
+        // EXP21 = 1 (Fritchii d603d98bb3): a texture whose handle word is a storage buffer's address
+        // gets no texture (VideoCommon::HandleIsStoragePointer). Ocarina of Time's Zora's River
+        // waterfall and other water flickered every other frame in bursts without it.
+        g_experiments[21].store(1, std::memory_order_relaxed);
         for (int n = 0; n < ExperimentCount; ++n) {
             const std::string name = "EDEN_NX2_EXP" + std::to_string(n);
             if (const char* value = std::getenv(name.c_str())) {
