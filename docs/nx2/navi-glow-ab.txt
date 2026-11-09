@@ -1,0 +1,36 @@
+Navi glow test: which change brings back the glow drawn in the wrong place?
+
+How to use: copy ONE group below into %APPDATA%\eden\nx2_switches.txt (remove the previous
+group first), start Nyamu, stand somewhere Navi moves around you for a minute (Kokiri Forest is
+fine) and watch her glow. Note for each group: glitch still there, or gone.
+
+If a group makes it go away, split that group: keep half of its lines, test, and so on, until
+one line is left. That line names the change, and I can fix it properly.
+
+
+# --- Group 1: GPU command timing --------------------------------------------------------------
+EDEN_NX2_RING_PAIRS=0
+EDEN_NX2_MACRO_SINK=0
+EDEN_NX2_COMPUTE_SINK=0
+EDEN_NX2_LIST_WAIT_SKIP=0
+EDEN_NX2_LIST_SUSPEND=0
+EDEN_NX2_PREDICT_ACQUIRE=0
+EDEN_NX2_DMA_READ_QUEUED=0
+EDEN_NX2_FRAMES_AHEAD=0
+
+
+# --- Group 2: buffers and constant data -------------------------------------------------------
+EDEN_NX2_UBO_INPLACE=0
+EDEN_NX2_PIPELINE_CLEAN=0
+EDEN_NX2_SKIP_UNCHANGED_WORDS=0
+EDEN_NX2_INVALIDATE_BLOCKS=0
+EDEN_NX2_USAGE_TRACKER_SKIP_FULL=0
+
+
+# --- Group 3: textures --------------------------------------------------------------------------
+EDEN_NX2_TC_SKIP_STALE=0
+EDEN_NX2_TC_JOIN_SKIP=0
+EDEN_NX2_PAGE_FILTER=0
+EDEN_NX2_ALIAS_SKIP=0
+EDEN_NX2_EXP8=0
+EDEN_NX2_EXP21=0
