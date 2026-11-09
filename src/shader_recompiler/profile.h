@@ -83,6 +83,10 @@ struct Profile {
     bool has_broken_spirv_clamp{};
     /// The Position builtin needs to be wrapped in a struct when used as an input
     bool has_broken_spirv_position_input{};
+    /// EDEN_NX2_INVARIANT_POSITION: vertex and mesh positions are decorated Invariant, so passes
+    /// that compute the same position with different shaders (a depth pre-pass and the main pass)
+    /// get the same value.
+    bool invariant_position{};
     /// Offset image operands with an unsigned type do not work
     bool has_broken_unsigned_image_offsets{};
     /// Signed instructions with unsigned data types are misinterpreted
