@@ -37,6 +37,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
 
 #if defined(__clang__) && defined(NDEBUG)
@@ -521,9 +522,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 add_image(desc, false);
             }
         }
+        // EDEN_NX2_EXP21 (default 1; 0 = off): no texture for a handle that is a buffer address.
+        const bool null_pointer_handles{VideoCore::Nx2Debug::Experiment(21) != 0};
         for (const auto& desc : info.texture_descriptors) {
             for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle{read_handle(desc, index)};
+                const auto handle{null_pointer_handles &&
+                                          VideoCommon::HandleIsStoragePointer(info, desc, index)
+                                      ? VideoCommon::NULL_TEXTURE_HANDLE
+                                      : read_handle(desc, index)};
                 views.push_back({handle.first});
 
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
