@@ -35,7 +35,6 @@ enum class Type {
     Max
 };
 
-template <class DeviceTracker, size_t stack_words, size_t size_bytes>
 /// EDEN_NX2_SKIP_UNCHANGED_WORDS=0: ForEachModifiedRange processes words with nothing modified
 /// as before zortos293's clean-bind skip (A/B).
 inline bool SkipUnchangedWords() {
@@ -46,6 +45,7 @@ inline bool SkipUnchangedWords() {
     return enabled;
 }
 
+template <class DeviceTracker, size_t stack_words, size_t size_bytes>
 struct WordManager {
     static constexpr size_t num_words = Common::DivCeil(size_bytes, BYTES_PER_WORD);
 
