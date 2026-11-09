@@ -811,4 +811,12 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
 }
 #endif
 
+bool Event::SleepFor(const std::chrono::nanoseconds time) {
+#ifdef _WIN32
+    return WaitForWin32Fallback(time);
+#else
+    return WaitFor(time);
+#endif
+}
+
 } // namespace Common

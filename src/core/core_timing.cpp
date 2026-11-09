@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <tuple>
@@ -86,7 +87,18 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
                         // There are more events left in the queue, wait until the next event.
                         auto const wait_time = *next_time - GetGlobalTimeNs().count();
                         if (wait_time > 0) {
-                            event.WaitFor(std::chrono::nanoseconds(wait_time));
+                            // Sleeps in the OS (Lichii #1016): the hardware wait of WaitFor
+                            // kept HostTiming at ~100% of a core on x86 Windows, with no change
+                            // in fps. EDEN_NX2_HOSTTIMING_SLEEP=0 waits in hardware as before.
+                            static const bool sleep = [] {
+                                const char* value = std::getenv("EDEN_NX2_HOSTTIMING_SLEEP");
+                                return value == nullptr || value[0] != '0';
+                            }();
+                            if (sleep) {
+                                event.SleepFor(std::chrono::nanoseconds(wait_time));
+                            } else {
+                                event.WaitFor(std::chrono::nanoseconds(wait_time));
+                            }
                         }
                     } else {
                         // Queue is empty, wait until another event is scheduled and signals us to

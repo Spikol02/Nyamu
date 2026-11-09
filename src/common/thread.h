@@ -42,6 +42,10 @@ public:
 
     bool WaitFor(const std::chrono::nanoseconds time);
 
+    /// Like WaitFor, but always blocks in the OS. On x86 Windows WaitFor keeps the thread running
+    /// in a hardware wait (MWAITX/UMWAIT); this sleeps on a high-resolution waitable timer.
+    bool SleepFor(const std::chrono::nanoseconds time);
+
     template<class Clock, class Duration>
     bool WaitUntil(const std::chrono::time_point<Clock, Duration> time) {
         std::unique_lock lk{mutex};
