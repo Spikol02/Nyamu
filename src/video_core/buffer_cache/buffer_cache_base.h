@@ -277,6 +277,9 @@ public:
 
     bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer);
 
+    /// EDEN_NX2_PREFLUSH_DECAY_MS: clears the Preflushable marks periodically (TickFrame).
+    void DecayPreflushMarks();
+
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size);
 
     void DisableGraphicsUniformBuffer(size_t stage, u32 index);
@@ -669,6 +672,27 @@ private:
     /// flush and rely on these downloads, e.g. collision meshes skinned by compute shaders.
     bool DownloadsAtFence(DAddr device_addr, u64 size) noexcept {
         return AsyncBufferDownloads() || memory_tracker.IsRegionPreflushable(device_addr, size);
+    }
+
+    /// Whether the range holds GPU-written data that no fence downloads (not Preflushable).
+    bool HasGpuWritesNotDownloadedAtFence(DAddr device_addr, u64 size) {
+        if (AsyncBufferDownloads()) {
+            return false;
+        }
+        bool found = false;
+        memory_tracker.ForEachDownloadRange(device_addr, size, false, [&](u64 start, u64 range_size) {
+            if (found) {
+                return;
+            }
+            u64 covered = 0;
+            memory_tracker.ForEachPreflushableRange(start, range_size, [&](u64 lower, u64 length) {
+                const u64 begin = (std::max)(lower, start);
+                const u64 end = (std::min)(lower + length, start + range_size);
+                covered += end > begin ? end - begin : 0;
+            });
+            found = covered < range_size;
+        });
+        return found;
     }
 
     /// Queues a GPU write for download at the next fence where DownloadsAtFence holds. With only
