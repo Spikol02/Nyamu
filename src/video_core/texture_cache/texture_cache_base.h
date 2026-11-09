@@ -589,9 +589,12 @@ private:
     void ClearStaleGpu(GPUVAddr gpu_addr, size_t size);
     [[nodiscard]] bool IsAllStale(DAddr addr, size_t size) const;
     void UpdateStaleTracking(u64 run_begin, u64 run_pages, s32 delta);
+    // Off unless EDEN_NX2_TC_SKIP_STALE=1, as in Fritchii (34a3627325: Hyrule Field 1% lows 40.2
+    // fps off against 36.5 on) and AMD Superior (white fog blobs until the area was entered
+    // again); #463 measured +20% in Castle Town.
     bool tc_skip_stale{[] {
         const char* value = std::getenv("EDEN_NX2_TC_SKIP_STALE");
-        return value == nullptr || value[0] != '0'; // EDEN_NX2_TC_SKIP_STALE=0: off
+        return value != nullptr && value[0] == '1';
     }()};
     /// Device memory pages (Core::Memory::YUZU_PAGEBITS), not this cache's 1 MiB lookup pages.
     static constexpr u64 STALE_PAGE_BITS = 12;
