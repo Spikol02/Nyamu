@@ -51,6 +51,7 @@
 #include "video_core/renderer_vulkan/vk_cooperative_hmma_test.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/oot_network.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -555,6 +556,13 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     };
     // Guest tensor operations stay on the emulated path unless EDEN_NX2_COOPERATIVE_HMMA=1: in
     // Ocarina of Time on an RX 9070 XT the cooperative path saved GPU time but no frame rate.
+    VideoCommon::OotNetwork::g_hardware_matrices.store(
+        device.IsCooperativeHmmaSupported() || device.IsCooperativeHmma16x16x16Supported(),
+        std::memory_order_relaxed);
+    if (!VideoCommon::OotNetwork::g_hardware_matrices.load(std::memory_order_relaxed)) {
+        LOG_INFO(Render_Vulkan, "No matrix cores: Ocarina of Time's anti-aliasing network is "
+                                "skipped unless its setting is Game");
+    }
     const char* const cooperative_env = std::getenv("EDEN_NX2_COOPERATIVE_HMMA");
     const bool cooperative_allowed = cooperative_env && cooperative_env[0] == '1';
     profile.support_cooperative_hmma = cooperative_allowed &&

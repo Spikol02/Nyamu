@@ -48,9 +48,23 @@ struct BypassState {
     std::atomic<bool> output_replaced{}; ///< the latest output pass was replaced
 };
 
+/// Whether the GPU has matrix cores for guest tensor operations (set by the pipeline cache).
+/// Without them the network runs in emulation: about 33 ms of GPU a frame for the movie network
+/// alone, and long enough single dispatches on an RX 6600 to approach Windows' GPU timeout.
+inline std::atomic<bool> g_hardware_matrices{true};
+
 inline bool BypassEnabled(u64 program_id) {
-    return program_id == ProgramId &&
-           Settings::values.oot_anti_aliasing.GetValue() == Settings::OotAntiAliasing::NoSharpening;
+    if (program_id != ProgramId) {
+        return false;
+    }
+    switch (Settings::values.oot_anti_aliasing.GetValue()) {
+    case Settings::OotAntiAliasing::NoSharpening:
+        return true;
+    case Settings::OotAntiAliasing::Auto:
+        return !g_hardware_matrices.load(std::memory_order_relaxed);
+    default:
+        return false;
+    }
 }
 
 } // namespace VideoCommon::OotNetwork

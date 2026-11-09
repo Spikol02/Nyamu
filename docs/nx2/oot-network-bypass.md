@@ -2,7 +2,11 @@
 
 The Legend of Zelda: Ocarina of Time (`0400486024DEC000`) runs a tensor network on its tonemapped
 image followed by an output pass that sharpens hard. The "Ocarina of Time anti-aliasing" setting
-(`oot_anti_aliasing`: Game / No sharpening) can skip both and show the tonemapped image instead.
+(`oot_anti_aliasing`: Game / No sharpening / Auto) can skip both and show the tonemapped image
+instead. Auto, the default, skips them on GPUs without matrix cores for the guest's tensor
+operations (`OotNetwork::g_hardware_matrices`, set by the pipeline cache from the device's
+cooperative matrix support): there the network runs in shader emulation, which on an RX 6600 made
+single dispatches long enough to approach Windows' GPU timeout.
 
 ## What the game does
 
@@ -42,12 +46,7 @@ frame runs the whole network natively again. The copy's source takes its block l
 tonemap draw's render target. The state lives in the rasterizer (`OotNetwork::BypassState`) because the tonemap
 pass draws on the 3D engine and the network's passes do not all run on the same compute engine.
 
-NVIDIA DLSS takes precedence: while Ocarina DLSS is enabled ("Use NVIDIA DLSS in place of a
-game's DLSS" on, with DLSS available from Streamline), `RasterizerVulkan::OotNetworkBypass` returns
-null and No sharpening does nothing, because DLSS replaces the same output pass
-(docs/native-dlss-replacement.md). The log says
-`Ocarina of Time: No sharpening is off while NVIDIA DLSS is on` once. Once DLSS turns itself off
-for the session or its evaluation fails, No sharpening takes over from the next frame.
+Nyamu has no Ocarina DLSS replacement, so nothing else claims the output pass.
 
 The game's constants (shader hashes, program keys, the cb0 offset) are in
 `src/video_core/oot_network.h`.
