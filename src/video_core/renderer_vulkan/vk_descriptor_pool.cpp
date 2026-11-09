@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "common/logging.h"
 #include <ranges>
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -80,14 +81,25 @@ static void AllocatePool(const Device& device, DescriptorBank& bank) {
     add(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.images);
     add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, info.sampled_images);
     add(VK_DESCRIPTOR_TYPE_SAMPLER, info.samplers);
-    bank.pools.push_back(device.GetLogical().CreateDescriptorPool({
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .maxSets = sets_per_pool,
-        .poolSizeCount = static_cast<u32>(pool_cursor),
-        .pPoolSizes = std::data(pool_sizes),
-    }));
+    try {
+        bank.pools.push_back(device.GetLogical().CreateDescriptorPool({
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .maxSets = sets_per_pool,
+            .poolSizeCount = static_cast<u32>(pool_cursor),
+            .pPoolSizes = std::data(pool_sizes),
+        }));
+    } catch (const vk::Exception& error) {
+        // Out of video memory, typically (Ocarina's castle courtyard with the texture cache let
+        // up to 8.2 GB of a 10.2 GB budget): say so before the emulator stops.
+        LOG_CRITICAL(Render_Vulkan,
+                     "Descriptor pool {} could not be made ({}); device memory in use {} MiB of "
+                     "a {} MiB budget",
+                     bank.pools.size(), error.what(), device.GetDeviceMemoryUsage() >> 20,
+                     device.GetDeviceMemoryBudget() >> 20);
+        throw;
+    }
 }
 
 DescriptorAllocator::DescriptorAllocator(const Device& device_, MasterSemaphore& master_semaphore_,
