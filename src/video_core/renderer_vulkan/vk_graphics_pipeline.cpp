@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <concepts>
 #include <cstdlib>
 #include <cstring>
 #include <future>
@@ -682,6 +683,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
+    // A draw that writes depth or stencil may sample its own depth attachment: keep where its
+    // sampled textures go (TextureCache::DepthAttachmentSnapshot).
+    SampledDescriptorSlots sampled_slots;
+    SampledDescriptorSlots* const track_sampled =
+        regs.depth_write_enabled != 0 || regs.stencil_enable != 0 ? &sampled_slots : nullptr;
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
@@ -690,7 +696,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
+                                 rescaling, samplers_it, views_it, track_sampled);
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -726,6 +732,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         texture_cache.UpdateRenderTargets(false);
         const std::span<const VideoCommon::ImageViewInOut> view_span{views.data(), views.size()};
         texture_cache.CheckFeedbackLoop(view_span);
+        if (!sampled_slots.empty()) {
+            SampleOwnDepth(sampled_slots);
+        }
         if (scheduler.TakeFragmentBarrier() &&
             (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
             scheduler.RequestOutsideRenderPassOperationContext();
@@ -736,6 +745,52 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
     return ConfigureDraw(rescaling, render_area);
+}
+
+// TextureCache::DepthAttachmentSnapshot only copies for runtimes that pass this.
+static_assert(requires(TextureCacheRuntime& r, const VideoCommon::ImageViewInfo& v,
+                       VideoCommon::ImageId id, Image& i) {
+    ImageView{r, v, id, i};
+    { i.OutOfMemory() } -> std::convertible_to<bool>;
+});
+
+void GraphicsPipeline::SampleOwnDepth(SampledDescriptorSlots& slots) {
+    // EDEN_NX2_DEPTH_SNAPSHOT=1: such draws read a copy of the attachment taken before the draw
+    // (nxnative e6f3083adc: Ocarina of Time's Death Mountain Trail cave entrance). Without it they
+    // are only counted, so a log shows whether a scene has them.
+    static const bool snapshot = [] {
+        const char* const value = std::getenv("EDEN_NX2_DEPTH_SNAPSHOT");
+        return value != nullptr && value[0] == '1';
+    }();
+    static std::atomic<u64> draws{};
+    bool copied = false;
+    for (SampledDescriptorSlot& slot : slots) {
+        if (!texture_cache.SamplesDepthAttachment(slot.view)) {
+            continue;
+        }
+        if (!copied) {
+            const u64 count = draws.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (count <= 8 || (count & (count - 1)) == 0) {
+                LOG_INFO(Render_Vulkan,
+                         "Draw writes depth and samples its own depth attachment ({} so far, "
+                         "pipeline {:016x}, fs {:016x}){}",
+                         count, key.Hash(), key.unique_hashes[4],
+                         snapshot ? ": it reads a copy" : "; EDEN_NX2_DEPTH_SNAPSHOT=1 copies it");
+            }
+        }
+        if (!snapshot) {
+            break;
+        }
+        ImageView* const copy = texture_cache.DepthAttachmentSnapshot(slot.view, !copied);
+        if (copy == nullptr) {
+            continue;
+        }
+        copied = true;
+        const VkImageView handle = copy->Handle(slot.type);
+        if (handle != VK_NULL_HANDLE) {
+            slot.entry->image.imageView = handle;
+        }
+    }
 }
 
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,

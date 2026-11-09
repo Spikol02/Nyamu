@@ -64,6 +64,11 @@ public:
         return upload_start ? static_cast<size_t>(payload_cursor - upload_start) : 0;
     }
 
+    /// Where the next Add writes (to patch an entry before the draw is configured).
+    DescriptorUpdateEntry* Cursor() const noexcept {
+        return payload_cursor;
+    }
+
     void AddSampledImage(VkImageView image_view, VkSampler sampler) {
         *(payload_cursor++) = VkDescriptorImageInfo{
             .sampler = sampler,

@@ -195,6 +195,8 @@ private:
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);
 
+    void SampleOwnDepth(SampledDescriptorSlots& slots);
+
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
 
