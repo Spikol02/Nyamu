@@ -356,11 +356,21 @@ public:
     std::array<f32, 4> words{};
 };
 
+/// A sampled texture's descriptor entry, kept so a draw can point it elsewhere before it is
+/// configured (TextureCache::DepthAttachmentSnapshot).
+struct SampledDescriptorSlot {
+    DescriptorUpdateEntry* entry;
+    VideoCommon::ImageViewId view;
+    Shader::TextureType type;
+};
+using SampledDescriptorSlots = boost::container::small_vector<SampledDescriptorSlot, 16>;
+
 inline void PushImageDescriptors(TextureCache& texture_cache,
                                  GuestDescriptorQueue& guest_descriptor_queue,
                                  const Shader::Info& info, RescalingPushConstant& rescaling,
                                  const VideoCommon::SamplerId*& samplers,
-                                 const VideoCommon::ImageViewInOut*& views) {
+                                 const VideoCommon::ImageViewInOut*& views,
+                                 SampledDescriptorSlots* sampled_slots = nullptr) {
     const u32 num_texture_buffers = Shader::NumDescriptors(info.texture_buffer_descriptors);
     const u32 num_image_buffers = Shader::NumDescriptors(info.image_buffer_descriptors);
     views += num_texture_buffers;
@@ -377,6 +387,9 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
                 if (null_image_view != VK_NULL_HANDLE) vk_image_view = null_image_view;
             }
             Sampler& sampler{texture_cache.GetSampler(sampler_id)};
+            if (sampled_slots != nullptr) {
+                sampled_slots->push_back({guest_descriptor_queue.Cursor(), image_view_id, desc.type});
+            }
             guest_descriptor_queue.AddSampledImage(vk_image_view,
                                                    sampler.HandleFor(image_view, desc.is_depth));
             const bool element_rescaled{texture_cache.IsRescaling(image_view)};

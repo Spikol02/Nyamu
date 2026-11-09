@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <concepts>
 #include <numeric>
 #include <cstdlib>
 #include <limits>
@@ -648,6 +649,9 @@ void TextureCache<P>::TickFrame() {
 
     runtime.TickFrame();
     ++frame_tick;
+    std::erase_if(retired_depth_snapshots, [this](const auto& retired) {
+        return frame_tick - retired.first > TICKS_TO_DESTROY + 2;
+    });
 
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
         for (auto& buffer : async_buffers_death_ring) {
@@ -805,6 +809,80 @@ bool TextureCache<P>::SamplesRenderTarget(std::span<const ImageViewInOut> views)
         }
     }
     return false;
+}
+
+template <class P>
+bool TextureCache<P>::SamplesDepthAttachment(ImageViewId view_id) const noexcept {
+    if (!view_id || (rt_active_mask & (1u << NUM_RT)) == 0) {
+        return false;
+    }
+    return slot_image_views[view_id].image_id == rt_depth_image_id;
+}
+
+template <class P>
+typename P::ImageView* TextureCache<P>::DepthAttachmentSnapshot(ImageViewId view_id, bool copy) {
+    // Vulkan only: OpenGL images have no OutOfMemory and build views differently.
+    constexpr bool supported = requires(Runtime& r, const ImageViewInfo& v, ImageId id, Image& i) {
+        ImageView{r, v, id, i};
+        { i.OutOfMemory() } -> std::convertible_to<bool>;
+    };
+    if constexpr (!supported) {
+        return nullptr;
+    } else {
+        if (!SamplesDepthAttachment(view_id)) {
+            return nullptr;
+        }
+        const ImageId image_id = slot_image_views[view_id].image_id;
+        Image& image = slot_images[image_id];
+        // One level and layer of a plain 2D image, as nxnative does: anything else reads directly.
+        constexpr auto unusual = ImageFlagBits::Rescaled | ImageFlagBits::Sparse |
+                                 ImageFlagBits::Unbacked | ImageFlagBits::SparseLayers |
+                                 ImageFlagBits::SparseTiles | ImageFlagBits::UnwrittenSparse;
+        if (image.info.type != ImageType::e2D || image.info.num_samples != 1 ||
+            image.info.resources.levels != 1 || image.info.resources.layers != 1 ||
+            True(image.flags & unusual)) {
+            return nullptr;
+        }
+        const auto info_it = std::ranges::find(image.image_view_ids, view_id);
+        if (info_it == image.image_view_ids.end()) {
+            return nullptr;
+        }
+        const ImageViewInfo& view_info =
+            image.image_view_infos[static_cast<size_t>(info_it - image.image_view_ids.begin())];
+        DepthSnapshot& snapshot = depth_snapshots[image_id.index];
+        if (!snapshot.image) {
+            auto copy_image = std::make_unique<Image>(runtime, image.info, image.gpu_addr, image.cpu_addr);
+            if (copy_image->OutOfMemory() || True(copy_image->flags & unusual)) {
+                depth_snapshots.erase(image_id.index);
+                return nullptr;
+            }
+            snapshot.image = std::move(copy_image);
+        }
+        ImageView* view = nullptr;
+        for (auto& [info, made] : snapshot.views) {
+            if (info == view_info) {
+                view = made.get();
+                break;
+            }
+        }
+        if (view == nullptr) {
+            auto& made = snapshot.views.emplace_back(
+                view_info, std::make_unique<ImageView>(runtime, view_info, image_id, *snapshot.image));
+            view = made.second.get();
+        }
+        if (copy) {
+            const ImageCopy whole{
+                .src_subresource = {.base_level = 0, .base_layer = 0, .num_layers = 1},
+                .dst_subresource = {.base_level = 0, .base_layer = 0, .num_layers = 1},
+                .src_offset = {0, 0, 0},
+                .dst_offset = {0, 0, 0},
+                .extent = image.info.size,
+            };
+            runtime.CopyImage(*snapshot.image, image, std::span{&whole, 1});
+            ++depth_snapshot_copies;
+        }
+        return view;
+    }
 }
 
 template <class P>
@@ -3773,6 +3851,11 @@ void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
 template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
+    if (const auto snapshot = depth_snapshots.find(image_id.index);
+        snapshot != depth_snapshots.end()) {
+        retired_depth_snapshots.emplace_back(frame_tick, std::move(snapshot->second));
+        depth_snapshots.erase(snapshot);
+    }
     ++images_deleted;
     MarkStale(image);
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while

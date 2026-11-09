@@ -11,6 +11,7 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -247,6 +248,15 @@ public:
     void CheckFeedbackLoop(std::span<const ImageViewInOut> views);
 
     [[nodiscard]] bool SamplesRenderTarget(std::span<const ImageViewInOut> views);
+
+    /// Whether this view samples the image bound as the depth attachment.
+    [[nodiscard]] bool SamplesDepthAttachment(ImageViewId view_id) const noexcept;
+
+    /// EDEN_NX2_DEPTH_SNAPSHOT: a draw that writes depth or stencil and samples its own depth
+    /// attachment reads a copy of it taken before the draw, as each fragment does on the console
+    /// (on PC GPUs the read of a compressed attachment being written is undefined). Copies the
+    /// attachment when `copy`, and returns the view of the copy matching view_id, or nullptr.
+    [[nodiscard]] ImageView* DepthAttachmentSnapshot(ImageViewId view_id, bool copy);
 
     /// Get the sampler from the graphics/compute descriptor table in the specified index
     Sampler* GetSampler(u32 index, bool compute);
@@ -661,6 +671,15 @@ private:
 
     u64 modification_tick = 0;
     u64 frame_tick = 0;
+    /// DepthAttachmentSnapshot copies, by the image (slot index) they copy, and the copies of
+    /// deleted images kept until the GPU is done with them (frame_tick when retired).
+    struct DepthSnapshot {
+        std::unique_ptr<Image> image;
+        std::vector<std::pair<ImageViewInfo, std::unique_ptr<ImageView>>> views;
+    };
+    std::unordered_map<u32, DepthSnapshot> depth_snapshots;
+    std::vector<std::pair<u64, DepthSnapshot>> retired_depth_snapshots;
+    u64 depth_snapshot_copies = 0;
 
     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
                                                Common::ThreadPlacement::Efficiency};
