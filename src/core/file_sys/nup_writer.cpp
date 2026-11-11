@@ -55,6 +55,7 @@ constexpr u8 KindAddon = 2;
 constexpr u8 FlagStandaloneUpdate = 0x01;
 constexpr u8 CodecRaw = 0;
 constexpr u8 CodecZstd = 1;
+constexpr u8 CodecZstdFrames = 2;
 
 constexpr u16 TlvNpdm = 0x0001;
 constexpr u16 TlvNacp = 0x0002;
@@ -1187,6 +1188,74 @@ private:
         return drain(empty, ZSTD_e_end);
     }
 
+    // CodecZstdFrames (.nyaa): independent zstd frames of options.frame_bytes after a frame
+    // table (NupFrames). Gives up (returns false) when the output is no smaller than the input.
+    bool WriteFramed(Common::FS::IOFile& in, u64 size, u64 start, u64& stored) {
+        const u32 frame_bytes = options.frame_bytes;
+        const u64 frame_count = (size + frame_bytes - 1) / frame_bytes;
+        if (frame_count > 0xFFFFFFFFULL) {
+            return false;
+        }
+        const u64 table_bytes = sizeof(NupFrames::Header) + (frame_count + 1) * sizeof(u64);
+        if (table_bytes >= size) {
+            return false;
+        }
+        std::vector<u64> offsets;
+        offsets.reserve(frame_count + 1);
+        WriteZeros(table_bytes);
+        stored = table_bytes;
+        auto& zstd = Compressor();
+        std::vector<u8> frame;
+        frame.reserve(frame_bytes);
+        std::vector<u8> packed(ZSTD_compressBound(frame_bytes));
+        bool fits = true;
+        const auto flush = [&] {
+            zstd.Begin(frame.size());
+            const size_t written = ZSTD_compress2(zstd.get(), packed.data(), packed.size(),
+                                                  frame.data(), frame.size());
+            if (ZSTD_isError(written)) {
+                throw PackError(PackResult::IoError,
+                                std::string{"zstd: "} + ZSTD_getErrorName(written));
+            }
+            offsets.push_back(stored);
+            stored += written;
+            if (stored >= size) {
+                return false;
+            }
+            Write(packed.data(), written);
+            frame.clear();
+            return true;
+        };
+        hash.Reset();
+        ReadSource(in, size, [&](const u8* data, size_t n) {
+            hash.Update(data, n);
+            while (n > 0) {
+                const size_t take = std::min<size_t>(n, frame_bytes - frame.size());
+                frame.insert(frame.end(), data, data + take);
+                data += take;
+                n -= take;
+                if (frame.size() == frame_bytes && !(fits = flush())) {
+                    return false;
+                }
+            }
+            return true;
+        });
+        if (fits && !frame.empty()) {
+            fits = flush();
+        }
+        if (!fits || offsets.size() != frame_count) {
+            return false;
+        }
+        offsets.push_back(stored);
+        const NupFrames::Header header{NupFrames::Magic, frame_bytes,
+                                       static_cast<u32>(frame_count), 0};
+        Seek(start);
+        Write(reinterpret_cast<const u8*>(&header), sizeof(header));
+        Write(reinterpret_cast<const u8*>(offsets.data()), offsets.size() * sizeof(u64));
+        Seek(start + stored);
+        return true;
+    }
+
     void PackFile(size_t index) {
         const auto source = SourceOf(index);
         Common::FS::IOFile in{source, Common::FS::FileAccessMode::Read};
@@ -1224,7 +1293,15 @@ private:
         extent.offset = start;
 
         bool compressed = false;
-        if (extent.size <= options.raw_threshold && options.zstd_level > 0) {
+        if (options.frame_bytes != 0 && options.zstd_level > 0) {
+            u64 stored = 0;
+            compressed = WriteFramed(in, extent.size, start, stored);
+            if (compressed) {
+                extent.codec = CodecZstdFrames;
+                extent.stored_size = stored;
+                extent.sha256 = hash.Final();
+            }
+        } else if (extent.size <= options.raw_threshold && options.zstd_level > 0) {
             u64 stored = 0;
             compressed = WriteCompressed(in, extent.size, stored);
             if (compressed) {
@@ -1980,6 +2057,66 @@ void WriteDir(const FileSys::VirtualDir& dir, const fs::path& dest, PackProgress
 }
 
 } // namespace
+
+std::filesystem::path DefaultNyaaPath(const std::filesystem::path& nup) {
+    auto path = nup;
+    path.replace_extension(".nyaa");
+    return path;
+}
+
+PackResult ConvertToNyaa(const std::filesystem::path& nup, const std::filesystem::path& nyaa,
+                         const std::function<void(const PackProgress&)>& progress,
+                         const std::atomic_bool* cancel, std::string* error_out) {
+    const auto fail = [&](PackResult result, std::string message) {
+        if (error_out) {
+            *error_out = std::move(message);
+        }
+        return result;
+    };
+    std::error_code ec;
+    if (std::filesystem::exists(nyaa, ec)) {
+        return fail(PackResult::InvalidSource, ToUtf8(nyaa) + " already exists");
+    }
+    auto temp = nyaa;
+    temp += ".unpacked";
+    std::filesystem::remove_all(temp, ec);
+    struct RemoveTemp {
+        std::filesystem::path path;
+        ~RemoveTemp() {
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+    } const remove_temp{temp};
+
+    // Progress: unpacking is the first half, packing the second.
+    const auto half = [&](u64 offset) {
+        return [&progress, offset](const PackProgress& step) {
+            if (!progress) {
+                return;
+            }
+            PackProgress total = step;
+            total.bytes_total = step.bytes_total * 2;
+            total.bytes_done = offset * step.bytes_total + step.bytes_done;
+            progress(total);
+        };
+    };
+    Metadata metadata = ProbeNupMetadata(nup);
+    std::string error;
+    switch (ExtractNup(nup, temp, half(0), cancel, &error)) {
+    case ExtractResult::Success:
+        break;
+    case ExtractResult::Cancelled:
+        return fail(PackResult::Cancelled, "cancelled");
+    case ExtractResult::InvalidSource:
+        return fail(PackResult::InvalidSource, error);
+    case ExtractResult::IoError:
+        return fail(PackResult::IoError, error);
+    }
+    PackOptions options;
+    options.frame_bytes = NupFrames::DefaultFrameBytes;
+    options.metadata = std::move(metadata);
+    return PackDump(temp, nyaa, options, half(1), cancel, error_out);
+}
 
 std::filesystem::path DefaultExtractPath(const std::filesystem::path& archive) {
     auto parent = archive.parent_path();

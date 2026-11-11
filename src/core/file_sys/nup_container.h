@@ -32,6 +32,24 @@ struct NupSpillFile {
     bool attempted{};
 };
 
+/// The .nyaa member layout (codec 2): this header, then frame_count + 1 u64 offsets from the
+/// extent start (each frame's start, then the extent end), then the frames. Every frame is an
+/// independent zstd frame of frame_bytes (the last one shorter), so reads need only the frames
+/// they touch.
+namespace NupFrames {
+constexpr u32 Magic = 0x314D5246; // "FRM1"
+constexpr u32 DefaultFrameBytes = 256 * 1024;
+#pragma pack(push, 1)
+struct Header {
+    u32 magic;
+    u32 frame_bytes;
+    u32 frame_count;
+    u32 reserved;
+};
+#pragma pack(pop)
+static_assert(sizeof(Header) == 16);
+} // namespace NupFrames
+
 /// LRU over decompressed zstd extents, shared by the files of one container.
 struct NupDecompressCache {
     static constexpr std::size_t DefaultCap = 512 * 1024 * 1024;

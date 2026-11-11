@@ -1096,3 +1096,51 @@ TEST_CASE("NUP loader leaves standalone update metadata unchanged", "[nup][loade
     REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
     REQUIRE(program_id == TitleId);
 }
+
+TEST_CASE("NUP converts to .nyaa frames that read back exactly", "[nup]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    MakeDump(root);
+    // Compressible and over four frames, so reads cross frame boundaries.
+    std::string big(FileSys::NupFrames::DefaultFrameBytes * 4 + 1234, '\0');
+    for (std::size_t i = 0; i < big.size(); ++i) {
+        big[i] = static_cast<char>((i * 7 + i / 4096) & 0x3F);
+    }
+    Put(root / "Base/RomFS/big.bin", big);
+
+    const auto archive = t.path / "Game.nup";
+    std::string error;
+    REQUIRE(FileSys::Nup::PackDump(root, archive, {}, {}, nullptr, &error) ==
+            FileSys::Nup::PackResult::Success);
+    const auto nyaa = FileSys::Nup::DefaultNyaaPath(archive);
+    REQUIRE(nyaa.extension() == ".nyaa");
+    REQUIRE(FileSys::Nup::ConvertToNyaa(archive, nyaa, {}, nullptr, &error) ==
+            FileSys::Nup::PackResult::Success);
+    INFO(error);
+    REQUIRE_FALSE(fs::exists(nyaa.string() + ".unpacked"));
+
+    FileSys::RealVfsFilesystem real;
+    NupContainer source{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    NupContainer converted{real.OpenFile(nyaa.string(), FileSys::OpenMode::Read)};
+    REQUIRE(converted.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(converted.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+    REQUIRE(converted.GetPackages().size() == source.GetPackages().size());
+    for (std::size_t i = 0; i < source.GetPackages().size(); ++i) {
+        REQUIRE(PackedTree(converted.GetExeFSDir(i)) == PackedTree(source.GetExeFSDir(i)));
+        REQUIRE(PackedTree(converted.GetRomFSDir(i)) == PackedTree(source.GetRomFSDir(i)));
+    }
+
+    const auto file = converted.GetRomFSDir(0)->GetFile("big.bin");
+    REQUIRE(file);
+    REQUIRE(Read(file) == big);
+    const std::size_t frame = FileSys::NupFrames::DefaultFrameBytes;
+    for (const std::size_t offset : {std::size_t{0}, frame - 10, frame * 2 - 1, frame * 3 + 77,
+                                     big.size() - 5}) {
+        std::string part(std::min<std::size_t>(frame + 20, big.size() - offset), '\0');
+        REQUIRE(file->Read(reinterpret_cast<u8*>(part.data()), part.size(), offset) ==
+                part.size());
+        REQUIRE(part == big.substr(offset, part.size()));
+    }
+    // Smaller on disk than the content, so it went through the frame codec.
+    REQUIRE(fs::file_size(nyaa) < fs::file_size(archive) + big.size());
+}

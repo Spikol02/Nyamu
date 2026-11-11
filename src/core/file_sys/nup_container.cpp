@@ -38,6 +38,9 @@ constexpr std::size_t TlvHeaderSize = 0x8;
 constexpr u32 TocMagic = 0x01434F54; // "TOC\x01" little-endian
 constexpr u8 CodecRaw = 0;
 constexpr u8 CodecZstd = 1;
+/// .nyaa: the extent is a frame table and independent zstd frames, so a read decompresses only the
+/// frames it touches (NupFrames in nup_container.h).
+constexpr u8 CodecZstdFrames = 2;
 constexpr u8 PackageFlagStandaloneUpdate = 0x01;
 constexpr u32 MaxDirDepth = 128;
 
@@ -437,6 +440,153 @@ private:
     bool cache_enabled;
 };
 
+/// A member stored as independent zstd frames (CodecZstdFrames, the .nyaa layout): a read
+/// decompresses only the frames it touches, each kept in the container's cache.
+class NupFramesFile final : public VfsFile {
+public:
+    NupFramesFile(VirtualFile backing_, u64 extent_offset_, u64 extent_size_,
+                  u64 uncompressed_size_, std::string name_,
+                  std::shared_ptr<NupDecompressCache> cache_, std::size_t file_index_)
+        : backing(std::move(backing_)), extent_offset(extent_offset_), extent_size(extent_size_),
+          uncompressed_size(uncompressed_size_), name(std::move(name_)), cache(std::move(cache_)),
+          file_index(file_index_) {}
+
+    std::string GetName() const override {
+        return name;
+    }
+    std::size_t GetSize() const override {
+        return static_cast<std::size_t>(uncompressed_size);
+    }
+    bool Resize(std::size_t) override {
+        return false;
+    }
+    VirtualDir GetContainingDirectory() const override {
+        return nullptr;
+    }
+    bool IsWritable() const override {
+        return false;
+    }
+    bool IsReadable() const override {
+        return true;
+    }
+    std::size_t Write(const u8*, std::size_t, std::size_t) override {
+        return 0;
+    }
+    bool Rename(std::string_view new_name) override {
+        name = std::string(new_name);
+        return true;
+    }
+
+    std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override {
+        if (offset >= uncompressed_size || !LoadTable()) {
+            return 0;
+        }
+        length = std::min(length, static_cast<std::size_t>(uncompressed_size) - offset);
+        std::size_t done = 0;
+        while (done < length) {
+            const u64 position = offset + done;
+            const u32 frame = static_cast<u32>(position / frame_bytes);
+            const u64 within = position % frame_bytes;
+            const std::size_t count = static_cast<std::size_t>(
+                std::min<u64>(length - done, FrameSize(frame) - within));
+            if (!CopyFromFrame(frame, within, data + done, count)) {
+                return done;
+            }
+            done += count;
+        }
+        return done;
+    }
+
+private:
+    bool LoadTable() const {
+        std::call_once(table_once, [this] {
+            NupFrames::Header header{};
+            if (extent_size < sizeof(header) ||
+                backing->ReadObject(&header, static_cast<std::size_t>(extent_offset)) !=
+                    sizeof(header) ||
+                header.magic != NupFrames::Magic || header.frame_bytes == 0 ||
+                header.frame_count !=
+                    (uncompressed_size + header.frame_bytes - 1) / header.frame_bytes) {
+                LOG_ERROR(Loader, "NUP frame table of {} is damaged", name);
+                return;
+            }
+            std::vector<u64> table(header.frame_count + 1);
+            const std::size_t bytes = table.size() * sizeof(u64);
+            if (sizeof(header) + bytes > extent_size ||
+                backing->Read(reinterpret_cast<u8*>(table.data()), bytes,
+                              static_cast<std::size_t>(extent_offset + sizeof(header))) != bytes) {
+                LOG_ERROR(Loader, "NUP frame table of {} is damaged", name);
+                return;
+            }
+            for (std::size_t i = 0; i + 1 < table.size(); ++i) {
+                if (table[i] > table[i + 1] || table[i + 1] > extent_size) {
+                    LOG_ERROR(Loader, "NUP frame table of {} is damaged", name);
+                    return;
+                }
+            }
+            frame_bytes = header.frame_bytes;
+            offsets = std::move(table);
+        });
+        return !offsets.empty();
+    }
+
+    u64 FrameSize(u32 frame) const {
+        return std::min<u64>(frame_bytes, uncompressed_size - u64{frame} * frame_bytes);
+    }
+
+    std::size_t CacheKey(u32 frame) const {
+        // Apart from the whole-file keys (member indices) of NupVfsFile.
+        return (std::size_t{1} << 63) | (static_cast<std::size_t>(file_index) << 24) | frame;
+    }
+
+    bool CopyFromFrame(u32 frame, u64 within, u8* out, std::size_t count) const {
+        const std::size_t key = CacheKey(frame);
+        {
+            std::scoped_lock lock{cache->mutex};
+            if (const auto* cached = cache->Find(key)) {
+                std::memcpy(out, cached->data() + within, count);
+                if (NupTrace::Enabled()) {
+                    NupTrace::NoteHit(count);
+                }
+                return true;
+            }
+        }
+        const auto begin = std::chrono::steady_clock::now();
+        const u64 stored = offsets[frame + 1] - offsets[frame];
+        const auto compressed = backing->ReadBytes(
+            static_cast<std::size_t>(stored), static_cast<std::size_t>(extent_offset + offsets[frame]));
+        std::vector<u8> plain(static_cast<std::size_t>(FrameSize(frame)));
+        if (compressed.size() != stored) {
+            return false;
+        }
+        const std::size_t result =
+            ZSTD_decompress(plain.data(), plain.size(), compressed.data(), compressed.size());
+        if (ZSTD_isError(result) || result != plain.size()) {
+            LOG_ERROR(Loader, "NUP zstd decompression failed for {} frame {}", name, frame);
+            return false;
+        }
+        if (NupTrace::Enabled()) {
+            NupTrace::NoteDecompress(cache.get(), key, name, stored, plain.size(),
+                                     std::chrono::steady_clock::now() - begin, false);
+        }
+        std::memcpy(out, plain.data() + within, count);
+        std::scoped_lock lock{cache->mutex};
+        cache->Insert(key, plain);
+        return true;
+    }
+
+    VirtualFile backing;
+    u64 extent_offset;
+    u64 extent_size;
+    u64 uncompressed_size;
+    std::string name;
+    std::shared_ptr<NupDecompressCache> cache;
+    std::size_t file_index;
+    mutable std::once_flag table_once;
+    mutable u32 frame_bytes{};
+    mutable std::vector<u64> offsets; ///< Frame starts within the extent, then the extent end
+};
+
 } // namespace
 
 NupSpillFile::~NupSpillFile() {
@@ -596,7 +746,7 @@ bool NupContainer::Parse() {
         FileRecord record{};
         std::memcpy(&record, base + pos, sizeof(record));
         pos += FileRecordSize;
-        if (record.codec > CodecZstd || record.codec_flags != 0 ||
+        if (record.codec > CodecZstdFrames || record.codec_flags != 0 ||
             (record.size == 0 && (record.extent_offset != 0 || record.extent_size != 0)) ||
             (record.size != 0 &&
              (record.extent_size == 0 || record.extent_offset < blob_offset ||
@@ -811,6 +961,10 @@ VirtualFile NupContainer::OpenFile(std::size_t file_index) {
             file, static_cast<std::size_t>(node.extent_size),
             static_cast<std::size_t>(node.extent_offset), node.name);
     }
+    if (node.codec == CodecZstdFrames) {
+        return std::make_shared<NupFramesFile>(file, node.extent_offset, node.extent_size,
+                                               node.size, node.name, cache, file_index);
+    }
     return std::make_shared<NupVfsFile>(file, node.extent_offset, node.extent_size, node.size,
                                         node.name, cache, file_index);
 }
@@ -934,6 +1088,10 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
             content = ReadExtentRaw(node);
         } else if (node.codec == CodecRaw) {
             content = ReadExtentRaw(node);
+        } else if (node.codec == CodecZstdFrames) {
+            NupFramesFile view(file, node.extent_offset, node.extent_size, node.size, node.name,
+                               cache, i);
+            content = view.ReadAllBytes();
         } else {
             NupVfsFile view(file, node.extent_offset, node.extent_size, node.size, node.name,
                             cache, i);

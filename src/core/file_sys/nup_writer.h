@@ -52,6 +52,10 @@ struct PackOptions {
     int zstd_level = 3;
     // Files larger than this are always stored raw.
     u64 raw_threshold = DefaultRawThreshold;
+    // Non-zero: every file is stored as independent zstd frames of this many bytes (the .nyaa
+    // layout, NupFrames), so a read decompresses only the frames it touches. raw_threshold is
+    // then not used.
+    u32 frame_bytes = 0;
     // Overrides for the name, icon and display version found in the dump.
     Metadata metadata;
 };
@@ -98,6 +102,15 @@ ExtractResult ExtractNup(const std::filesystem::path& archive,
                          const std::atomic_bool* cancel = nullptr,
                          std::string* error_out = nullptr);
 std::filesystem::path DefaultExtractPath(const std::filesystem::path& archive);
+
+// Rewrites a NUP as a .nyaa: the same packages, files and metadata, with every file stored as
+// 256 KiB zstd frames. Extracts to a temporary folder beside `nyaa` (it needs the game's
+// unpacked size free there), packs it and removes the folder.
+PackResult ConvertToNyaa(const std::filesystem::path& nup, const std::filesystem::path& nyaa,
+                         const std::function<void(const PackProgress&)>& progress = {},
+                         const std::atomic_bool* cancel = nullptr,
+                         std::string* error_out = nullptr);
+std::filesystem::path DefaultNyaaPath(const std::filesystem::path& nup);
 
 // Default-language metadata edit. nullopt keeps the stored value, an empty value removes it.
 struct MetadataEdit {
