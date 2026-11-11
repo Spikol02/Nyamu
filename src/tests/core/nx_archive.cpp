@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <map>
 #include <atomic>
 #include <random>
 #include <string>
@@ -17,6 +21,8 @@
 #include "core/core_timing.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
+#include "core/file_sys/nup_container.h"
+#include "core/file_sys/nup_writer.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/vfs/vfs_real.h"
@@ -302,4 +308,74 @@ TEST_CASE("NX: an extracted add-on is listed as add-on content after Load", "[co
     const auto romfs = FileSys::ExtractRomFS(nca->GetRomFS());
     REQUIRE(romfs != nullptr);
     CHECK(ReadText(romfs->GetFile("dlc.bin")) == "dlc");
+}
+
+namespace {
+std::map<std::string, std::string> HostTree(const std::filesystem::path& root) {
+    std::map<std::string, std::string> files;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file()) {
+            std::ifstream in(entry.path(), std::ios::binary);
+            files[std::filesystem::relative(entry.path(), root).generic_string()] =
+                std::string{std::istreambuf_iterator<char>(in), {}};
+        }
+    }
+    return files;
+}
+} // namespace
+
+TEST_CASE("NX: an archive of extracted trees converts to .nyaa and back to the same files",
+          "[core][nx]") {
+    const auto temp = std::filesystem::temp_directory_path() /
+                      ("nyaa-nx-" + std::to_string(
+                                        std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(temp);
+    SCOPE_EXIT {
+        std::error_code ec;
+        std::filesystem::remove_all(temp, ec);
+    };
+    const auto fixture = OpenFixture("lichii_synthetic.nx");
+    REQUIRE(fixture != nullptr);
+
+    // The NX unpacked directly.
+    std::string error;
+    REQUIRE(FileSys::ExtractNxToDump(fixture, temp / "direct", error));
+    INFO(error);
+    const auto direct = HostTree(temp / "direct");
+    REQUIRE(direct.contains("base/exefs/main"));
+
+    // Through a .nyaa: written with frames, intact, and unpacking it gives the same files.
+    const auto nx_path = temp / "game.nx";
+    {
+        std::ofstream out(nx_path, std::ios::binary);
+        const auto bytes = fixture->ReadAllBytes();
+        out.write(reinterpret_cast<const char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
+    }
+    const auto nyaa = temp / "game.nyaa";
+    REQUIRE(FileSys::Nup::ConvertNxToNyaa(nx_path, nyaa, {}, nullptr, &error) ==
+            FileSys::Nup::PackResult::Success);
+    for (const auto& entry : std::filesystem::directory_iterator(temp)) {
+        CHECK_FALSE(entry.path().extension() == ".tmp");
+    }
+    FileSys::RealVfsFilesystem real;
+    FileSys::NupContainer container{real.OpenFile(nyaa.string(), FileSys::OpenMode::Read)};
+    REQUIRE(container.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(container.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+    REQUIRE(container.FindBasePackage().has_value());
+    REQUIRE(FileSys::Nup::ExtractNup(nyaa, temp / "back") == FileSys::Nup::ExtractResult::Success);
+    CHECK(HostTree(temp / "back") == direct);
+}
+
+TEST_CASE("NX: an archive of native NCA content is not unpacked to a dump", "[core][nx]") {
+    // Not a tree archive: ExtractNxToDump refuses it with a reason instead of writing a dump.
+    const auto temp = std::filesystem::temp_directory_path() / "nyaa-nx-native";
+    std::string error;
+    const auto file = OpenFixture("dlc_with_program.nx");
+    REQUIRE(file != nullptr);
+    if (!FileSys::ExtractNxToDump(file, temp, error)) {
+        CHECK_FALSE(error.empty());
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(temp, ec);
 }

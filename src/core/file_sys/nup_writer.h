@@ -115,6 +115,18 @@ std::filesystem::path DefaultNyaaPath(const std::filesystem::path& nup);
 // A temporary folder beside `target` with a short name (nyaa-xxxxxxxx.tmp), for unpacking a
 // game: Windows refuses paths over 260 characters.
 std::filesystem::path ShortTempDirBeside(const std::filesystem::path& target);
+// Packs a loose dump straight to a .nyaa (PackDump with 256 KiB zstd frames).
+PackResult PackDumpToNyaa(const std::filesystem::path& dump_root, const std::filesystem::path& nyaa,
+                          const std::function<void(const PackProgress&)>& progress = {},
+                          const std::atomic_bool* cancel = nullptr,
+                          std::string* error_out = nullptr);
+
+// Rewrites an NX archive made from extracted trees (FileSys::ExtractNxToDump) as a .nyaa,
+// through a temporary folder beside `nyaa`.
+PackResult ConvertNxToNyaa(const std::filesystem::path& nx, const std::filesystem::path& nyaa,
+                           const std::function<void(const PackProgress&)>& progress = {},
+                           const std::atomic_bool* cancel = nullptr,
+                           std::string* error_out = nullptr);
 
 // Default-language metadata edit. nullopt keeps the stored value, an empty value removes it.
 struct MetadataEdit {

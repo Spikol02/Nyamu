@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,6 +14,13 @@
 namespace FileSys {
 class ManualContentProvider;
 class NACP;
+
+/// Writes the snapshots of an NX archive made from extracted trees (a NUP, .nyaa or dump folder)
+/// as a loose dump: base/, updates/<version>/ and dlc/<title id>/<n>/. Archives of native NCA
+/// content (from NSP or XCI) are refused. `progress` gets (bytes written, total) and stops the
+/// copy when it returns false.
+bool ExtractNxToDump(const VirtualFile& file, const std::filesystem::path& out_dir,
+                     std::string& error, const std::function<bool(u64, u64)>& progress = {});
 } // namespace FileSys
 
 namespace Loader {

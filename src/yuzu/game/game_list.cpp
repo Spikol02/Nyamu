@@ -509,7 +509,8 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         extract_nup->setEnabled(!nup_conversion_running);
     }
     QAction* convert_nyaa = nullptr;
-    if (is_nup_archive) {
+    if (is_nup_archive || is_loose_dump ||
+        QString::fromStdString(path).endsWith(QStringLiteral(".nx"), Qt::CaseInsensitive)) {
         convert_nyaa = context_menu.addAction(tr("Convert to .nyaa (faster loading)..."));
         convert_nyaa->setEnabled(!nup_conversion_running);
     }

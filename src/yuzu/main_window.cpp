@@ -4496,11 +4496,23 @@ void MainWindow::OnGameListConvertToNyaa(const std::string& game_path) {
     const auto to_path = [](const std::string& utf8) {
         return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
     };
-    const auto archive = to_path(game_path);
+    // The source: a NUP, an NX archive (made from extracted trees) or a loose dump folder.
+    auto archive = to_path(game_path);
+    enum class Source { Nup, Nx, Dump } source = Source::Nup;
+    std::filesystem::path suggested = FileSys::Nup::DefaultNyaaPath(archive);
+    if (const auto dump_root = FileSys::Nup::DumpRootFromMain(archive)) {
+        source = Source::Dump;
+        archive = *dump_root;
+        auto name = archive.filename();
+        name += ".nyaa";
+        suggested = archive.parent_path() / name;
+    } else if (QString::fromStdString(game_path).endsWith(QStringLiteral(".nx"),
+                                                           Qt::CaseInsensitive)) {
+        source = Source::Nx;
+    }
     const auto out_dir = QFileDialog::getSaveFileName(
         this, tr("Convert to .nyaa"),
-        QString::fromStdString(
-            Common::FS::PathToUTF8String(FileSys::Nup::DefaultNyaaPath(archive))),
+        QString::fromStdString(Common::FS::PathToUTF8String(suggested)),
         tr("Nyamu package (*.nyaa)"));
     if (out_dir.isEmpty()) {
         return;
@@ -4511,7 +4523,9 @@ void MainWindow::OnGameListConvertToNyaa(const std::string& game_path) {
                                  tr("The target file already exists:\n%1").arg(out_dir));
         return;
     }
-    const auto probed = FileSys::Nup::ProbeNupMetadata(archive);
+    const auto probed = source == Source::Nup    ? FileSys::Nup::ProbeNupMetadata(archive)
+                        : source == Source::Dump ? FileSys::Nup::ProbeMetadata(archive)
+                                                 : FileSys::Nup::Metadata{};
     const QString progress_title =
         QString::fromStdString(probed.title_name).trimmed().isEmpty()
             ? tr("Converting to .nyaa")
@@ -4538,7 +4552,7 @@ void MainWindow::OnGameListConvertToNyaa(const std::string& game_path) {
 
     const auto cancel = nup_cancel;
     auto last_update = std::make_shared<std::chrono::steady_clock::time_point>();
-    nup_watcher.setFuture(QtConcurrent::run([this, archive, out_path, cancel, last_update] {
+    nup_watcher.setFuture(QtConcurrent::run([this, archive, source, out_path, cancel, last_update] {
         std::string error;
         const auto on_progress = [this,
                                   last_update](const FileSys::Nup::PackProgress& progress) {
@@ -4558,7 +4572,14 @@ void MainWindow::OnGameListConvertToNyaa(const std::string& game_path) {
                 Qt::QueuedConnection);
         };
         const auto result =
-            FileSys::Nup::ConvertToNyaa(archive, out_path, on_progress, cancel.get(), &error);
+            source == Source::Dump
+                ? FileSys::Nup::PackDumpToNyaa(archive, out_path, on_progress, cancel.get(),
+                                               &error)
+            : source == Source::Nx
+                ? FileSys::Nup::ConvertNxToNyaa(archive, out_path, on_progress, cancel.get(),
+                                                &error)
+                : FileSys::Nup::ConvertToNyaa(archive, out_path, on_progress, cancel.get(),
+                                              &error);
         QMetaObject::invokeMethod(
             this,
             [this, result, error, out_path] {
