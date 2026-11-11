@@ -2058,6 +2058,13 @@ void WriteDir(const FileSys::VirtualDir& dir, const fs::path& dest, PackProgress
 
 } // namespace
 
+std::filesystem::path ShortTempDirBeside(const std::filesystem::path& target) {
+    std::array<u8, 4> random{};
+    RAND_bytes(random.data(), static_cast<int>(random.size()));
+    return target.parent_path() / fmt::format("nyaa-{:02x}{:02x}{:02x}{:02x}.tmp", random[0],
+                                              random[1], random[2], random[3]);
+}
+
 std::filesystem::path DefaultNyaaPath(const std::filesystem::path& nup) {
     auto path = nup;
     path.replace_extension(".nyaa");
@@ -2077,8 +2084,9 @@ PackResult ConvertToNyaa(const std::filesystem::path& nup, const std::filesystem
     if (std::filesystem::exists(nyaa, ec)) {
         return fail(PackResult::InvalidSource, ToUtf8(nyaa) + " already exists");
     }
-    auto temp = nyaa;
-    temp += ".unpacked";
+    // A short name: Windows refuses paths over 260 characters, and a game's own folders are
+    // deep (Ocarina of Time: a long file name plus the game's folders went to 262).
+    const auto temp = ShortTempDirBeside(nyaa);
     std::filesystem::remove_all(temp, ec);
     struct RemoveTemp {
         std::filesystem::path path;

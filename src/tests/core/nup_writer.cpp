@@ -1117,7 +1117,10 @@ TEST_CASE("NUP converts to .nyaa frames that read back exactly", "[nup]") {
     REQUIRE(FileSys::Nup::ConvertToNyaa(archive, nyaa, {}, nullptr, &error) ==
             FileSys::Nup::PackResult::Success);
     INFO(error);
-    REQUIRE_FALSE(fs::exists(nyaa.string() + ".unpacked"));
+    // The temporary folder (nyaa-*.tmp beside it) is gone.
+    for (const auto& entry : fs::directory_iterator(nyaa.parent_path())) {
+        CHECK_FALSE(entry.path().extension() == ".tmp");
+    }
 
     FileSys::RealVfsFilesystem real;
     NupContainer source{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
