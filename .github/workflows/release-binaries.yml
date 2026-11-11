@@ -7,6 +7,14 @@ on:
         description: Publish the binaries as a GitHub release
         type: boolean
         default: true
+      release_title:
+        description: Release title (empty for the automatic build title)
+        type: string
+        default: ""
+      release_notes:
+        description: Markdown file in the repository put above the download tables (e.g. docs/releases/nyamu-2.0.md)
+        type: string
+        default: ""
   push:
     branches:
       - nx2-experimental
@@ -433,6 +441,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out release notes
+        if: inputs.release_notes != ''
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: docs/releases
+
       - name: Download binaries
         uses: actions/download-artifact@v7
         with:
@@ -468,6 +482,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TITLE: ${{ inputs.release_title }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
           set -euo pipefail
           tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/build-${GITHUB_RUN_NUMBER}" --jq '.object.sha')
@@ -478,7 +494,12 @@ jobs:
           tag="build-${GITHUB_RUN_NUMBER}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
 
-          cat > notes.md <<EOF
+          : > notes.md
+          if [ -n "${RELEASE_NOTES}" ]; then
+            cat "${RELEASE_NOTES}" >> notes.md
+            printf '\n\n' >> notes.md
+          fi
+          cat >> notes.md <<EOF
           Automatic build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}.
 
           ## Linux
@@ -501,9 +522,14 @@ jobs:
           The PGO builds are the same programs compiled with profile-guided optimization (clang plus Eglantine's profile); prefer them when your CPU supports it.
           EOF
 
+          title="${RELEASE_TITLE:-Nyamu ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})}"
+          prerelease=(--prerelease)
+          if [ -n "${RELEASE_TITLE}" ]; then
+            prerelease=(--latest)
+          fi
           gh release create "${tag}" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
-            --prerelease \
-            --title "Nyamu ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
+            "${prerelease[@]}" \
+            --title "${title}" \
             --notes-file notes.md
