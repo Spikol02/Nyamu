@@ -80,14 +80,15 @@ const MemoryInfo& GetMemInfo() {
 ProcessMemoryUsage GetProcessMemoryUsage() {
     ProcessMemoryUsage usage{};
 #ifdef _WIN32
-    PROCESS_MEMORY_COUNTERS_EX2 counters{};
+    // PROCESS_MEMORY_COUNTERS_EX: MinGW's headers have no _EX2 (PrivateWorkingSetSize), so
+    // private_working_set stays 0 on Windows.
+    PROCESS_MEMORY_COUNTERS_EX counters{};
     counters.cb = sizeof(counters);
     if (GetProcessMemoryInfo(GetCurrentProcess(),
                              reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
                              sizeof(counters))) {
         usage.commit = counters.PrivateUsage;
         usage.working_set = counters.WorkingSetSize;
-        usage.private_working_set = counters.PrivateWorkingSetSize;
     }
     PERFORMANCE_INFORMATION performance{};
     performance.cb = sizeof(performance);
