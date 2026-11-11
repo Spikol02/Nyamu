@@ -13,6 +13,7 @@
 #include <boost/container/small_vector.hpp>
 #include <fmt/format.h>
 
+#include "video_core/renderer_vulkan/pipeline_build_failure.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/vulkan_common/pipeline_build_trace.h"
 #include "video_core/renderer_vulkan/pipeline_compile_trace.h"
@@ -301,8 +302,9 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             const PipelineBuildTrace::Scope build_trace{"compute", shader_hash, {shader_hash}};
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
         } catch (const vk::Exception& exception) {
-            LOG_CRITICAL(Render_Vulkan, "Adreno rejected compute shader {:016X}: {}", shader_hash,
+            LOG_CRITICAL(Render_Vulkan, "Driver rejected compute shader {:016X}: {}", shader_hash,
                          exception.what());
+            ReportPipelineBuildFailure(exception.GetResult());
             std::scoped_lock lock{build_mutex};
             is_built = true;
             build_condvar.notify_one();
