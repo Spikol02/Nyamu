@@ -112,6 +112,10 @@ PackResult ConvertToNyaa(const std::filesystem::path& nup, const std::filesystem
                          std::string* error_out = nullptr);
 std::filesystem::path DefaultNyaaPath(const std::filesystem::path& nup);
 
+// A temporary folder beside `target` with a short name (nyaa-xxxxxxxx.tmp), for unpacking a
+// game: Windows refuses paths over 260 characters.
+std::filesystem::path ShortTempDirBeside(const std::filesystem::path& target);
+
 // Default-language metadata edit. nullopt keeps the stored value, an empty value removes it.
 struct MetadataEdit {
     std::optional<std::string> title_name;
