@@ -4,13 +4,17 @@
 #include "core/file_sys/nup_container.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstddef>
 #include <cstring>
 #include <list>
 #include <map>
+#include <mutex>
 #include <random>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <fmt/format.h>
 #include <openssl/evp.h>
@@ -149,6 +153,85 @@ bool Sha256(const u8* data, std::size_t size, std::array<u8, 0x20>& out) {
     return length == out.size();
 }
 
+/// EDEN_NX2_NUP_TRACE=1: times the decompression of NUP members, to see how much of a load is
+/// spent there. Logs each slow or large decompression, every member decompressed more than once
+/// (evicted from the cache and read again), and a summary every 5 seconds while reads happen.
+namespace NupTrace {
+bool Enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_NUP_TRACE");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+struct Stats {
+    std::mutex mutex;
+    std::unordered_set<u64> seen; ///< (cache, member) pairs decompressed at least once
+    u64 decompressions{};
+    u64 repeats{};
+    u64 spills{};
+    u64 bytes_in{};
+    u64 bytes_out{};
+    u64 hits{};
+    u64 hit_bytes{};
+    std::chrono::nanoseconds time{};
+    std::chrono::steady_clock::time_point last_summary{};
+    u32 lines{};
+};
+
+Stats& Get() {
+    static Stats stats;
+    return stats;
+}
+
+void MaybeSummary(Stats& stats) {
+    const auto now = std::chrono::steady_clock::now();
+    if (stats.last_summary.time_since_epoch().count() != 0 &&
+        now - stats.last_summary < std::chrono::seconds{5}) {
+        return;
+    }
+    stats.last_summary = now;
+    LOG_INFO(Loader,
+             "NUP trace: {} decompressions ({} repeated, {} to temporary files), {} MiB -> {} MiB "
+             "in {:.0f} ms total; {} cache hits ({} MiB copied)",
+             stats.decompressions, stats.repeats, stats.spills, stats.bytes_in >> 20,
+             stats.bytes_out >> 20,
+             std::chrono::duration<double, std::milli>(stats.time).count(), stats.hits,
+             stats.hit_bytes >> 20);
+}
+
+void NoteDecompress(const void* cache, std::size_t index, const std::string& name, u64 in,
+                    u64 out, std::chrono::nanoseconds time, bool spilled) {
+    Stats& stats = Get();
+    std::scoped_lock lock{stats.mutex};
+    const u64 key = (reinterpret_cast<uintptr_t>(cache) * 0x9E3779B97F4A7C15ULL) ^ index;
+    const bool repeat = !stats.seen.insert(key).second;
+    ++stats.decompressions;
+    stats.repeats += repeat;
+    stats.spills += spilled;
+    stats.bytes_in += in;
+    stats.bytes_out += out;
+    stats.time += time;
+    const double ms = std::chrono::duration<double, std::milli>(time).count();
+    if ((ms >= 20.0 || out >= (u64{4} << 20) || repeat || spilled) && stats.lines < 400) {
+        ++stats.lines;
+        LOG_INFO(Loader, "NUP trace: {} {} KiB -> {} KiB in {:.1f} ms{}{}", name, in >> 10,
+                 out >> 10, ms, spilled ? " (to a temporary file)" : "",
+                 repeat ? " (again: evicted from the cache)" : "");
+    }
+    MaybeSummary(stats);
+}
+
+void NoteHit(std::size_t length) {
+    Stats& stats = Get();
+    std::scoped_lock lock{stats.mutex};
+    ++stats.hits;
+    stats.hit_bytes += length;
+    MaybeSummary(stats);
+}
+} // namespace NupTrace
+
 /// A member file whose extent is zstd-compressed. Decompresses on first read and caches the
 /// result (LRU-evicted); a file over half the cache cap is decompressed once to a temporary file.
 class NupVfsFile final : public VfsFile {
@@ -198,12 +281,20 @@ public:
             std::scoped_lock lock{cache->mutex};
             if (const auto* cached = cache->Find(cache_index)) {
                 std::memcpy(data, cached->data() + offset, length);
+                if (NupTrace::Enabled()) {
+                    NupTrace::NoteHit(length);
+                }
                 return length;
             }
         }
 
         // Miss: decompress without holding the lock, then publish and copy.
+        const auto begin = std::chrono::steady_clock::now();
         std::vector<u8> scratch = Decompress();
+        if (NupTrace::Enabled() && !scratch.empty()) {
+            NupTrace::NoteDecompress(cache.get(), cache_index, name, extent_size, scratch.size(),
+                                     std::chrono::steady_clock::now() - begin, false);
+        }
         if (scratch.empty()) {
             return 0;
         }
@@ -238,7 +329,13 @@ private:
         std::scoped_lock lock{spill->mutex};
         if (!spill->attempted) {
             spill->attempted = true;
+            const auto begin = std::chrono::steady_clock::now();
             DecompressToFile(*spill);
+            if (NupTrace::Enabled()) {
+                NupTrace::NoteDecompress(cache.get(), cache_index, name, extent_size,
+                                         uncompressed_size,
+                                         std::chrono::steady_clock::now() - begin, true);
+            }
         }
         if (!spill->file.IsOpen() || !spill->file.Seek(static_cast<s64>(offset))) {
             return 0;
