@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
 #include "core/file_sys/errors.h"
@@ -35,8 +36,16 @@ Result IStorage::Read(
     R_UNLESS(length >= 0, FileSys::ResultInvalidSize);
     R_UNLESS(offset >= 0, FileSys::ResultInvalidOffset);
 
+    // Upstream paces game file reads to 40 MB/s for video freezes in other games (Eden #4525).
+    // In Ocarina of Time it slept 36-151 ms at boot and area loads and 47 ms when a killed Peahat
+    // loaded its effects (Fritchii e1c7514de7, 28a71116d8), so it is off here:
+    // EDEN_NX2_READ_THROTTLE=1 paces reads again.
+    static const bool throttle = [] {
+        const char* const value = std::getenv("EDEN_NX2_READ_THROTTLE");
+        return value != nullptr && value[0] == '1';
+    }();
     const auto now = std::chrono::steady_clock::now();
-    if (now < next_read_tick) {
+    if (throttle && now < next_read_tick) {
         std::this_thread::sleep_for(next_read_tick - now);
     }
     next_read_tick = std::chrono::steady_clock::now() +
