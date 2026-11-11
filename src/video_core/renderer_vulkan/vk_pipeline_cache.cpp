@@ -1904,12 +1904,12 @@ void PipelineCache::PreparePrecompiled(u64 title_id, const std::filesystem::path
                     .read(reinterpret_cast<char*>(ids.data()), count * sizeof(u32));
                 const bool compute = kind == 1;
                 ComputePipelineCacheKey compute_key{};
-                GraphicsPipelineCacheKey graphics_key{};
+                GraphicsPipelineCacheKey record_key{};
                 if (compute) {
                     in.read(reinterpret_cast<char*>(&compute_key), sizeof(compute_key));
                 } else {
-                    in.read(reinterpret_cast<char*>(&graphics_key), sizeof(graphics_key));
-                    auto& key_state = graphics_key.state;
+                    in.read(reinterpret_cast<char*>(&record_key), sizeof(record_key));
+                    auto& key_state = record_key.state;
                     // The driver fields only tell cache generations apart; the pipeline does not
                     // use them. Records are built for this driver, as draws will key them.
                     key_state.driver_id = dynamic_features.driver_id;
@@ -1936,7 +1936,7 @@ void PipelineCache::PreparePrecompiled(u64 title_id, const std::filesystem::path
                     if (other_device) {
                         ++state.other_device;
                         skipped = true;
-                    } else if (disk_keys.contains(graphics_key.Hash())) {
+                    } else if (disk_keys.contains(record_key.Hash())) {
                         ++state.known;
                         skipped = true;
                     }
@@ -1971,7 +1971,7 @@ void PipelineCache::PreparePrecompiled(u64 title_id, const std::filesystem::path
                             env_ptrs.push_back(&env);
                         }
                         const auto pipeline{CreateGraphicsPipeline(
-                            pools, graphics_key, MakeSpan(env_ptrs), nullptr, false)};
+                            pools, record_key, MakeSpan(env_ptrs), nullptr, false)};
                         ok = pipeline != nullptr && pipeline->IsBuilt();
                     }
                 }
