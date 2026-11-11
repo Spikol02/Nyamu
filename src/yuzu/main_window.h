@@ -364,6 +364,7 @@ private slots:
     void OnGameListDeleteShaderWarm(u64 program_id);
     void PrepareShaderPrecache(u64 title_id, const std::filesystem::path& game_path);
     void OnGameListExtractNup(const std::string& game_path);
+    void OnGameListConvertToNyaa(const std::string& game_path);
     void OnGameListEditNupMetadata(const std::string& game_path);
     void OnGameListCopyTID(u64 program_id);
     void OnGameListCreateShortcut(u64 program_id, const std::string& game_path,

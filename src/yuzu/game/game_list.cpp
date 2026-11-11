@@ -497,6 +497,11 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         extract_nup = context_menu.addAction(tr("Dump NUP..."));
         extract_nup->setEnabled(!nup_conversion_running);
     }
+    QAction* convert_nyaa = nullptr;
+    if (is_nup_archive) {
+        convert_nyaa = context_menu.addAction(tr("Convert to .nyaa (faster loading)..."));
+        convert_nyaa->setEnabled(!nup_conversion_running);
+    }
     QMenu* dump_romfs_menu = context_menu.addMenu(tr("Dump RomFS"));
     QAction* dump_romfs = dump_romfs_menu->addAction(tr("Dump RomFS"));
     QAction* dump_romfs_sdmc = dump_romfs_menu->addAction(tr("Dump RomFS to SDMC"));
@@ -606,6 +611,10 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     if (extract_nup) {
         connect(extract_nup, &QAction::triggered, this,
                 [this, path]() { emit ExtractNupRequested(path); });
+    }
+    if (convert_nyaa) {
+        connect(convert_nyaa, &QAction::triggered, this,
+                [this, path]() { emit ConvertToNyaaRequested(path); });
     }
     if (edit_nup) {
         connect(edit_nup, &QAction::triggered, this,

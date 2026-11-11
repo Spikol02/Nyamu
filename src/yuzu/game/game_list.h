@@ -112,6 +112,7 @@ signals:
     void VerifyIntegrityRequested(const std::string& game_path);
     void ConvertToNupRequested(const std::string& game_path);
     void ExtractNupRequested(const std::string& game_path);
+    void ConvertToNyaaRequested(const std::string& game_path);
     void EditNupMetadataRequested(const std::string& game_path);
     void CopyTIDRequested(u64 program_id);
     void CreateShortcut(u64 program_id, const std::string& game_path,

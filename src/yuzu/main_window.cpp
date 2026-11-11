@@ -1477,6 +1477,8 @@ void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::DeleteShaderWarmRequested, this,
             &MainWindow::OnGameListDeleteShaderWarm);
     connect(game_list, &GameList::ExtractNupRequested, this, &MainWindow::OnGameListExtractNup);
+    connect(game_list, &GameList::ConvertToNyaaRequested, this,
+            &MainWindow::OnGameListConvertToNyaa);
     connect(game_list, &GameList::EditNupMetadataRequested, this,
             &MainWindow::OnGameListEditNupMetadata);
     connect(game_list, &GameList::CopyTIDRequested, this, &MainWindow::OnGameListCopyTID);
@@ -4447,6 +4449,110 @@ void MainWindow::OnGameListExtractNup(const std::string& game_path) {
                 case FileSys::Nup::ExtractResult::InvalidSource:
                 case FileSys::Nup::ExtractResult::IoError:
                     QMessageBox::critical(this, tr("Extraction Failed"),
+                                          QString::fromStdString(error));
+                    break;
+                }
+            },
+            Qt::QueuedConnection);
+        return FileSys::Nup::PackResult::Success;
+    }));
+}
+
+void MainWindow::OnGameListConvertToNyaa(const std::string& game_path) {
+    if (nup_running) {
+        return;
+    }
+    const auto to_path = [](const std::string& utf8) {
+        return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
+    };
+    const auto archive = to_path(game_path);
+    const auto out_dir = QFileDialog::getSaveFileName(
+        this, tr("Convert to .nyaa"),
+        QString::fromStdString(
+            Common::FS::PathToUTF8String(FileSys::Nup::DefaultNyaaPath(archive))),
+        tr("Nyamu package (*.nyaa)"));
+    if (out_dir.isEmpty()) {
+        return;
+    }
+    const auto out_path = to_path(out_dir.toStdString());
+    if (std::filesystem::exists(out_path)) {
+        QMessageBox::information(this, tr("Convert to .nyaa"),
+                                 tr("The target file already exists:\n%1").arg(out_dir));
+        return;
+    }
+    const auto probed = FileSys::Nup::ProbeNupMetadata(archive);
+    const QString progress_title =
+        QString::fromStdString(probed.title_name).trimmed().isEmpty()
+            ? tr("Converting to .nyaa")
+            : QString::fromStdString(probed.title_name);
+    QPixmap progress_icon;
+    if (!probed.icon.empty()) {
+        progress_icon.loadFromData(probed.icon.data(),
+                                   static_cast<uint>(probed.icon.size()));
+    }
+
+    nup_running = true;
+    nup_source_path = game_path;
+    game_list->SetNupConversionRunning(true);
+    nup_cancel = std::make_shared<std::atomic_bool>(false);
+    nup_progress = new NupProgressDialog(tr("Converting to .nyaa"), progress_title, progress_icon, this);
+    connect(nup_progress, &NupProgressDialog::CancelRequested, this,
+            [this, cancel = nup_cancel] {
+                cancel->store(true);
+                if (nup_progress) {
+                    nup_progress->SetCancelling();
+                }
+            });
+    nup_progress->show();
+
+    const auto cancel = nup_cancel;
+    auto last_update = std::make_shared<std::chrono::steady_clock::time_point>();
+    nup_watcher.setFuture(QtConcurrent::run([this, archive, out_path, cancel, last_update] {
+        std::string error;
+        const auto on_progress = [this,
+                                  last_update](const FileSys::Nup::PackProgress& progress) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - *last_update < std::chrono::milliseconds(200)) {
+                return;
+            }
+            *last_update = now;
+            QMetaObject::invokeMethod(
+                this,
+                [this, progress] {
+                    if (!nup_progress) {
+                        return;
+                    }
+                    nup_progress->SetProgress(progress);
+                },
+                Qt::QueuedConnection);
+        };
+        const auto result =
+            FileSys::Nup::ConvertToNyaa(archive, out_path, on_progress, cancel.get(), &error);
+        QMetaObject::invokeMethod(
+            this,
+            [this, result, error, out_path] {
+                nup_running = false;
+                nup_source_path.clear();
+                game_list->SetNupConversionRunning(false);
+                if (nup_progress) {
+                    nup_progress->Finish();
+                    nup_progress->deleteLater();
+                    nup_progress = nullptr;
+                }
+                nup_cancel.reset();
+                switch (result) {
+                case FileSys::Nup::PackResult::Success:
+                    QMessageBox::information(
+                        this, tr("Conversion Complete"),
+                        tr("The .nyaa was written. Once it loads, you can delete the NUP file if "
+                           "you no longer need it."));
+                    game_list->RefreshGameDirectory();
+                    break;
+                case FileSys::Nup::PackResult::Cancelled:
+                    break;
+                case FileSys::Nup::PackResult::InvalidSource:
+                case FileSys::Nup::PackResult::IoError:
+                    QMessageBox::critical(this, tr("Conversion Failed"),
                                           QString::fromStdString(error));
                     break;
                 }

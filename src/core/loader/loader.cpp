@@ -211,7 +211,7 @@ FileType GuessFromFilename(const std::string& name) {
         return FileType::XCZ;
     else if (extension == "nsp")
         return FileType::NSP;
-    else if (extension == "nup")
+    else if (extension == "nup" || extension == "nyaa")
         return FileType::NUP;
     else if (extension == "nsz")
         return FileType::NSZ;
