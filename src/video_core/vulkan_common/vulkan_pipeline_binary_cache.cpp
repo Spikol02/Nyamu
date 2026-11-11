@@ -425,9 +425,20 @@ void Deactivate() {
     }
 }
 
+namespace {
+thread_local bool t_skip = false;
+}
+
+void SkipOnThisThread(bool skip) {
+    t_skip = skip;
+}
+
 bool CreateGraphicsPipeline(VkDevice device, const vk::DeviceDispatch& dld,
                             const VkGraphicsPipelineCreateInfo& ci, VkPipelineCache cache,
                             VkPipeline* out, VkResult* result) {
+    if (t_skip) {
+        return false;
+    }
     std::shared_lock lock{active_mutex};
     if (!active) {
         return false;
@@ -443,6 +454,9 @@ bool CreateGraphicsPipeline(VkDevice device, const vk::DeviceDispatch& dld,
 bool CreateComputePipeline(VkDevice device, const vk::DeviceDispatch& dld,
                            const VkComputePipelineCreateInfo& ci, VkPipelineCache cache,
                            VkPipeline* out, VkResult* result) {
+    if (t_skip) {
+        return false;
+    }
     std::shared_lock lock{active_mutex};
     if (!active) {
         return false;

@@ -30,6 +30,10 @@ void Activate(VkDevice device, const vk::DeviceDispatch& dld, const std::filesys
 /// Stops it and closes the file. Pipelines created afterwards are built normally.
 void Deactivate();
 
+/// Pipelines created on this thread while set are built the usual way and not saved (the
+/// precompiled preparation: its pipelines only fill the driver's own cache).
+void SkipOnThisThread(bool skip);
+
 /// Called by vk::Device. Returns false when the pipeline should be created the usual way.
 bool CreateGraphicsPipeline(VkDevice device, const vk::DeviceDispatch& dld,
                             const VkGraphicsPipelineCreateInfo& ci, VkPipelineCache cache,

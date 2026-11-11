@@ -235,6 +235,16 @@ private:
                          std::unordered_set<u64> precached, std::stop_token stop_loading,
                          const VideoCore::DiskResourceLoadCallback& callback);
 
+    /// Fritchii v5's shader precompile (zortos293/Lichii#895), on the loading screen after the
+    /// precache: finds the title's precompiled file, or assembles one from a recipe
+    /// (VideoCommon::Nx2Precompile) and the game's files, then builds and drops every pipeline it
+    /// holds, so the driver's own cache has them before they are first drawn. Draws still build
+    /// their own pipelines and find the driver's compiled code. Runs once per file, driver and
+    /// build; a skipped or stopped run continues from its checkpoint at the next boot.
+    void PreparePrecompiled(u64 title_id, const std::filesystem::path& base_dir,
+                            std::stop_token stop_loading,
+                            const VideoCore::DiskResourceLoadCallback& callback);
+
     const Device& device;
     Scheduler& scheduler;
     DescriptorPool& descriptor_pool;

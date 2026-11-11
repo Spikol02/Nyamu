@@ -254,6 +254,12 @@ add_custom_command(TARGET yuzu POST_BUILD
         "${PROJECT_SOURCE_DIR}/dist/nx2_switches.txt" "$<TARGET_FILE_DIR:yuzu>/nx2_switches.txt"
     VERBATIM)
 
+# Shader precompile recipes (Fritchii v5, zortos293/Lichii#895), found in <exe dir>/recipes/.
+add_custom_command(TARGET yuzu POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${PROJECT_SOURCE_DIR}/dist/recipes" "$<TARGET_FILE_DIR:yuzu>/recipes"
+    VERBATIM)
+
 if (YUZU_CRASH_DUMPS)
     target_sources(yuzu PRIVATE
         breakpad.cpp
