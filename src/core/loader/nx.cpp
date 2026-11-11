@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <filesystem>
+#include <span>
+#include <map>
+#include <functional>
 #include <array>
 #include <cstring>
 #include <condition_variable>
@@ -14,6 +18,7 @@
 #include <nx_session.hpp>
 #include <zstd.h>
 
+#include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/fs_util.h"
 #include "common/fs/path_util.h"
@@ -372,6 +377,108 @@ VirtualDir NxSnapshotDirectory(std::shared_ptr<nx::Session> session, u32 snapsho
 }
 
 } // namespace
+
+namespace {
+// Copies `dir` into the host folder `out`, file by file in 4 MiB pieces.
+bool CopyTree(const VirtualDir& dir, const std::filesystem::path& out, u64& done, u64 total,
+              const std::function<bool(u64, u64)>& progress, std::string& error) {
+    std::error_code ec;
+    std::filesystem::create_directories(out, ec);
+    if (ec) {
+        error = "cannot create " + Common::FS::PathToUTF8String(out);
+        return false;
+    }
+    std::vector<u8> buffer(4 << 20);
+    for (const auto& file : dir->GetFiles()) {
+        const auto path = out / Common::FS::ToU8String(file->GetName());
+        Common::FS::IOFile host{path, Common::FS::FileAccessMode::Write};
+        if (!host.IsOpen()) {
+            error = "cannot write " + Common::FS::PathToUTF8String(path);
+            return false;
+        }
+        const std::size_t size = file->GetSize();
+        for (std::size_t offset = 0; offset < size;) {
+            const std::size_t length = std::min(buffer.size(), size - offset);
+            if (file->Read(buffer.data(), length, offset) != length) {
+                error = "cannot read " + file->GetName() + " from the NX archive";
+                return false;
+            }
+            if (host.WriteSpan(std::span<const u8>{buffer.data(), length}) != length) {
+                error = "cannot write " + Common::FS::PathToUTF8String(path) +
+                        ", the disk may be full";
+                return false;
+            }
+            offset += length;
+            done += length;
+            if (progress && !progress(done, total)) {
+                error = "cancelled";
+                return false;
+            }
+        }
+    }
+    for (const auto& sub : dir->GetSubdirectories()) {
+        if (!CopyTree(sub, out / Common::FS::ToU8String(sub->GetName()), done, total, progress,
+                      error)) {
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
+
+bool ExtractNxToDump(const VirtualFile& file, const std::filesystem::path& out_dir,
+                     std::string& error, const std::function<bool(u64, u64)>& progress) {
+    auto session = OpenNxSession(file, {}, {});
+    if (!session) {
+        error = "cannot open the NX archive: " + session.error.message;
+        return false;
+    }
+    const auto& archive = (*session.value)->archive();
+    const auto& snapshots = archive.snapshots();
+    static constexpr std::array<u8, 16> none{};
+    // Snapshot type: 0 base, 1 update, 2 add-on, 3 standalone update (see AppLoader_NX).
+    std::vector<std::pair<u32, std::filesystem::path>> plan;
+    std::map<u64, u32> addon_count;
+    u64 total = 0;
+    for (u32 si = 0; si < snapshots.size(); ++si) {
+        const auto& s = snapshots[si];
+        const auto addon = s.addon_title_id();
+        if (s.content_id != none && !addon) {
+            error = "the NX archive holds native NCA content (made from an NSP or XCI); convert "
+                    "the original NSP, XCI or NUP instead";
+            return false;
+        }
+        std::filesystem::path target;
+        if (addon) {
+            target = std::filesystem::path{"dlc"} / fmt::format("{:016X}", *addon) /
+                     std::to_string(addon_count[*addon]++);
+        } else if (s.type == 1 || s.type == 3) {
+            target = std::filesystem::path{"updates"} / std::to_string(s.numeric_version);
+        } else if (s.type == 0) {
+            target = "base";
+        } else {
+            continue;
+        }
+        plan.emplace_back(si, target);
+        total += s.logical_size;
+    }
+    if (std::ranges::none_of(plan, [](const auto& p) { return p.second == "base"; })) {
+        error = "the NX archive has no base game";
+        return false;
+    }
+    u64 done = 0;
+    for (const auto& [si, target] : plan) {
+        const auto root = NxSnapshotDirectory(*session.value, si);
+        if (root == nullptr) {
+            error = "cannot open a snapshot of the NX archive";
+            return false;
+        }
+        if (!CopyTree(root, out_dir / target, done, total, progress, error)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 } // namespace FileSys
 

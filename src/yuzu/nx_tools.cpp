@@ -59,7 +59,7 @@
 
 namespace {
 
-enum class Kind { None, Package, Nup, Dump };
+enum class Kind { None, Package, Nup, Nyaa, Dump };
 
 std::filesystem::path ToPath(const std::string& path) {
     return std::filesystem::path(Common::FS::ToU8String(path));
@@ -88,6 +88,9 @@ Kind KindOf(const std::string& path) {
     }
     if (HasExtension(path, ".nup")) {
         return Kind::Nup;
+    }
+    if (HasExtension(path, ".nyaa")) {
+        return Kind::Nyaa;
     }
     if (HasExtension(path, ".nsp") || HasExtension(path, ".xci")) {
         return Kind::Package;
@@ -272,6 +275,10 @@ struct NxTools::Job {
             nxformat_source_free(source);
         }
         nxformat_cancel_free(cancel);
+        if (!temp_dir.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(temp_dir, ec);
+        }
     }
 
     QString title;
@@ -296,6 +303,11 @@ struct NxTools::Job {
     QStringList skipped;
     // The new icon given to set-metadata, removed when the job ends.
     std::unique_ptr<QTemporaryFile> icon_file;
+    // Run on the worker thread before nxformat (a .nyaa is unpacked to temp_dir first, as
+    // nxformat reads NUPs itself and not .nyaa frames). Returns an error, empty on success.
+    std::function<QString(Job&)> prepare;
+    std::filesystem::path temp_dir;
+    std::atomic_bool cancel_requested{false};
 
     // nxformat 1.0.1 fails pack and add when the rebuild recipe cannot be kept (1.0.0 only
     // warned). Such a failure can be run again without the recipe.
@@ -493,6 +505,33 @@ void NxTools::ConvertToNx(const std::string& game_path) {
         job->args = {
             "pack-nup",   game_path,   output, "--platform", PlatformArgument(NupIsSwitch2(file)),
             "--frontend", "--no-trail"};
+        break;
+    }
+    case Kind::Nyaa: {
+        // nxformat reads NUPs itself and not .nyaa frames: unpack to a loose dump first.
+        const auto file = vfs->OpenFile(game_path, FileSys::OpenMode::Read);
+        const bool switch2 = NupIsSwitch2(file);
+        // Short: Windows refuses paths over 260 characters (see ShortTempDirBeside).
+        const auto temp = FileSys::Nup::ShortTempDirBeside(ToPath(output));
+        job->temp_dir = temp;
+        job->prepare = [nyaa = source, temp](Job& j) -> QString {
+            std::error_code ec;
+            std::filesystem::remove_all(temp, ec);
+            std::atomic_bool cancel{false};
+            std::string error;
+            const auto result = FileSys::Nup::ExtractNup(
+                nyaa, temp,
+                [&j, &cancel](const FileSys::Nup::PackProgress& step) {
+                    j.total = step.bytes_total;
+                    j.written = step.bytes_done;
+                    cancel = j.cancel_requested.load();
+                },
+                &cancel, &error);
+            return result == FileSys::Nup::ExtractResult::Success ? QString{}
+                                                                   : QString::fromStdString(error);
+        };
+        job->args = {"pack-tree",  ToUtf8(temp), output, "--platform", PlatformArgument(switch2),
+                     "--frontend", "--no-trail"};
         break;
     }
     case Kind::Dump:
@@ -811,6 +850,7 @@ void NxTools::Start(std::shared_ptr<Job> job) {
     progress->setAutoClose(false);
     progress->setAutoReset(false);
     connect(progress, &QProgressDialog::canceled, this, [this, job] {
+        job->cancel_requested = true;
         nxformat_cancel_set(job->cancel);
         if (progress) {
             progress->setLabelText(tr("Cancelling..."));
@@ -874,6 +914,21 @@ void NxTools::Start(std::shared_ptr<Job> job) {
     progress->show();
 
     job->future = QtConcurrent::run([this, job] {
+        if (job->prepare) {
+            const QString prepare_error = job->prepare(*job);
+            if (!prepare_error.isEmpty() || job->cancel_requested) {
+                const int prepare_code =
+                    job->cancel_requested ? NXFORMAT_CANCELLED : NXFORMAT_FAILED;
+                QMetaObject::invokeMethod(
+                    this, [this, job, prepare_code, prepare_error] {
+                        Finished(job, prepare_code, prepare_error);
+                    },
+                    Qt::QueuedConnection);
+                return;
+            }
+            job->total = 0;
+            job->written = 0;
+        }
         std::vector<const char*> args;
         args.reserve(job->args.size());
         for (const auto& arg : job->args) {

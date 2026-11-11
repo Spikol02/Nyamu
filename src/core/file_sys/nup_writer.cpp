@@ -30,6 +30,7 @@
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/loader/deconstructed_rom_directory.h"
+#include "core/loader/nx.h"
 
 #include <fmt/format.h>
 
@@ -2058,6 +2059,13 @@ void WriteDir(const FileSys::VirtualDir& dir, const fs::path& dest, PackProgress
 
 } // namespace
 
+std::filesystem::path ShortTempDirBeside(const std::filesystem::path& target) {
+    std::array<u8, 4> random{};
+    RAND_bytes(random.data(), static_cast<int>(random.size()));
+    return target.parent_path() / fmt::format("nyaa-{:02x}{:02x}{:02x}{:02x}.tmp", random[0],
+                                              random[1], random[2], random[3]);
+}
+
 std::filesystem::path DefaultNyaaPath(const std::filesystem::path& nup) {
     auto path = nup;
     path.replace_extension(".nyaa");
@@ -2077,8 +2085,9 @@ PackResult ConvertToNyaa(const std::filesystem::path& nup, const std::filesystem
     if (std::filesystem::exists(nyaa, ec)) {
         return fail(PackResult::InvalidSource, ToUtf8(nyaa) + " already exists");
     }
-    auto temp = nyaa;
-    temp += ".unpacked";
+    // A short name: Windows refuses paths over 260 characters, and a game's own folders are
+    // deep (Ocarina of Time: a long file name plus the game's folders went to 262).
+    const auto temp = ShortTempDirBeside(nyaa);
     std::filesystem::remove_all(temp, ec);
     struct RemoveTemp {
         std::filesystem::path path;
@@ -2116,6 +2125,67 @@ PackResult ConvertToNyaa(const std::filesystem::path& nup, const std::filesystem
     options.frame_bytes = NupFrames::DefaultFrameBytes;
     options.metadata = std::move(metadata);
     return PackDump(temp, nyaa, options, half(1), cancel, error_out);
+}
+
+PackResult PackDumpToNyaa(const std::filesystem::path& dump_root, const std::filesystem::path& nyaa,
+                          const std::function<void(const PackProgress&)>& progress,
+                          const std::atomic_bool* cancel, std::string* error_out) {
+    PackOptions options;
+    options.frame_bytes = NupFrames::DefaultFrameBytes;
+    return PackDump(dump_root, nyaa, options, progress, cancel, error_out);
+}
+
+PackResult ConvertNxToNyaa(const std::filesystem::path& nx, const std::filesystem::path& nyaa,
+                           const std::function<void(const PackProgress&)>& progress,
+                           const std::atomic_bool* cancel, std::string* error_out) {
+    const auto fail = [&](PackResult result, std::string message) {
+        if (error_out) {
+            *error_out = std::move(message);
+        }
+        return result;
+    };
+    std::error_code ec;
+    if (std::filesystem::exists(nyaa, ec)) {
+        return fail(PackResult::InvalidSource, ToUtf8(nyaa) + " already exists");
+    }
+    const auto temp = ShortTempDirBeside(nyaa);
+    std::filesystem::remove_all(temp, ec);
+    struct RemoveTemp {
+        std::filesystem::path path;
+        ~RemoveTemp() {
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+    } const remove_temp{temp};
+
+    RealVfsFilesystem real;
+    const auto file = real.OpenFile(ToUtf8(nx), OpenMode::Read);
+    if (file == nullptr) {
+        return fail(PackResult::InvalidSource, "cannot open " + ToUtf8(nx));
+    }
+    // Progress: unpacking is the first half, packing the second.
+    std::string error;
+    const bool unpacked = ExtractNxToDump(file, temp, error, [&](u64 done, u64 total) {
+        if (progress && total != 0) {
+            progress(PackProgress{.bytes_done = done, .bytes_total = total * 2});
+        }
+        return cancel == nullptr || !cancel->load();
+    });
+    if (!unpacked) {
+        return fail(error == "cancelled" ? PackResult::Cancelled : PackResult::InvalidSource,
+                    error);
+    }
+    return PackDumpToNyaa(
+        temp, nyaa,
+        [&progress](const PackProgress& step) {
+            if (progress) {
+                PackProgress total = step;
+                total.bytes_total = step.bytes_total * 2;
+                total.bytes_done = step.bytes_total + step.bytes_done;
+                progress(total);
+            }
+        },
+        cancel, error_out);
 }
 
 std::filesystem::path DefaultExtractPath(const std::filesystem::path& archive) {
