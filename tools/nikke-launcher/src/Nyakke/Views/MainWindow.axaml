@@ -1,0 +1,110 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Nyakke.ViewModels"
+        xmlns:core="using:Nyakke.Core"
+        x:Class="Nyakke.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Icon="/Assets/nyakke.ico"
+        Title="{Binding Title}"
+        Width="1100" Height="640" CanResize="False"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource InkBrush}">
+    <Grid>
+        <!-- Backdrop: drawn here, or the player's own picture. -->
+        <Border>
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                    <GradientStop Offset="0" Color="#141B2E" />
+                    <GradientStop Offset="0.55" Color="#0D111C" />
+                    <GradientStop Offset="1" Color="#1D1220" />
+                </LinearGradientBrush>
+            </Border.Background>
+        </Border>
+        <Ellipse Width="760" Height="760" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-300,-220,0">
+            <Ellipse.Fill>
+                <RadialGradientBrush>
+                    <GradientStop Offset="0" Color="#55FF5C6E" />
+                    <GradientStop Offset="1" Color="#00FF5C6E" />
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+        </Ellipse>
+        <Ellipse Width="620" Height="620" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="-240,0,0,-330">
+            <Ellipse.Fill>
+                <RadialGradientBrush>
+                    <GradientStop Offset="0" Color="#444FD1E8" />
+                    <GradientStop Offset="1" Color="#004FD1E8" />
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+        </Ellipse>
+        <Image Source="{Binding Background}" Stretch="UniformToFill" />
+        <Border>
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                    <GradientStop Offset="0" Color="#D90B0E16" />
+                    <GradientStop Offset="0.6" Color="#590B0E16" />
+                    <GradientStop Offset="1" Color="#260B0E16" />
+                </LinearGradientBrush>
+            </Border.Background>
+        </Border>
+
+        <Grid Margin="36,28,36,24" RowDefinitions="Auto,Auto,*,Auto">
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel>
+                    <TextBlock Text="{Binding Title}" FontSize="40" FontWeight="Black" LetterSpacing="2" />
+                    <TextBlock Text="Unofficial launcher for NIKKE" Foreground="{StaticResource DimTextBrush}" FontSize="14" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Top">
+                    <Button Classes="ghost" Content="Safety check" Command="{Binding CheckCommand}" />
+                    <Button Classes="ghost" Content="Game folder" Command="{Binding FolderCommand}" />
+                    <Button Classes="ghost" Content="Settings" Command="{Binding SettingsCommand}" />
+                </StackPanel>
+            </Grid>
+
+            <Border Grid.Row="1" Margin="0,18,0,0" Padding="16,10" CornerRadius="10" Background="#CC7A1420"
+                    BorderBrush="#FF4D5E" BorderThickness="1" IsVisible="{Binding HasAlert}">
+                <TextBlock Text="{Binding AlertText}" TextWrapping="Wrap" FontWeight="SemiBold" />
+            </Border>
+
+            <Border Grid.Row="2" Classes="card" Width="560" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <ItemsControl ItemsSource="{Binding Rows}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:StatusRow">
+                            <Grid ColumnDefinitions="18,150,*" Margin="0,7">
+                                <Ellipse Width="9" Height="9" Fill="{Binding Dot}" VerticalAlignment="Top"
+                                         HorizontalAlignment="Left" Margin="0,5,0,0" />
+                                <TextBlock Grid.Column="1" Text="{Binding Label}" Foreground="{StaticResource DimTextBrush}" />
+                                <TextBlock Grid.Column="2" Text="{Binding Value}" TextWrapping="Wrap" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Border>
+
+            <Grid Grid.Row="3" ColumnDefinitions="*,Auto">
+                <StackPanel VerticalAlignment="Bottom" Spacing="6">
+                    <TextBlock Text="{Binding StatusText}" FontSize="15" TextWrapping="Wrap" MaxWidth="620"
+                               HorizontalAlignment="Left" />
+                    <ItemsControl ItemsSource="{Binding Links}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" Spacing="2" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="core:LinkItem">
+                                <Button Classes="link" Content="{Binding Name}" CommandParameter="{Binding Url}"
+                                        Command="{Binding $parent[Window].((vm:MainViewModel)DataContext).LinkCommand}" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Spacing="8" VerticalAlignment="Bottom">
+                    <Button Classes="play" Content="{Binding PlayText}" Command="{Binding PlayCommand}"
+                            IsEnabled="{Binding CanPlay}" HorizontalAlignment="Right" MinWidth="260" />
+                    <TextBlock Text="{Binding PlayHint}" Foreground="{StaticResource DimTextBrush}" FontSize="12"
+                               TextWrapping="Wrap" MaxWidth="300" TextAlignment="Right" HorizontalAlignment="Right" />
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

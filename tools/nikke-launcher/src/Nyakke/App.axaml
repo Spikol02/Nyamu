@@ -1,0 +1,56 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Nyakke.App"
+             RequestedThemeVariant="Dark">
+    <Application.Resources>
+        <Color x:Key="SystemAccentColor">#FF5C6E</Color>
+        <SolidColorBrush x:Key="InkBrush" Color="#0B0E16" />
+        <SolidColorBrush x:Key="CardBrush" Color="#B3101522" />
+        <SolidColorBrush x:Key="CardEdgeBrush" Color="#26FFFFFF" />
+        <SolidColorBrush x:Key="DimTextBrush" Color="#A8B0C2" />
+        <LinearGradientBrush x:Key="AccentBrush" StartPoint="0%,0%" EndPoint="100%,100%">
+            <GradientStop Offset="0" Color="#FF5C6E" />
+            <GradientStop Offset="1" Color="#FF8A4C" />
+        </LinearGradientBrush>
+    </Application.Resources>
+    <Application.Styles>
+        <FluentTheme />
+        <Style Selector="Border.card">
+            <Setter Property="Background" Value="{StaticResource CardBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource CardEdgeBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="14" />
+            <Setter Property="Padding" Value="20,16" />
+        </Style>
+        <Style Selector="Button.play">
+            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Foreground" Value="#14161E" />
+            <Setter Property="FontSize" Value="26" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="CornerRadius" Value="14" />
+            <Setter Property="Padding" Value="56,18" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Button.play:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#FF7A86" />
+            <Setter Property="Foreground" Value="#14161E" />
+        </Style>
+        <Style Selector="Button.play:disabled /template/ ContentPresenter">
+            <Setter Property="Background" Value="#3A4052" />
+            <Setter Property="Foreground" Value="#8891A6" />
+        </Style>
+        <Style Selector="Button.ghost">
+            <Setter Property="Background" Value="#33101522" />
+            <Setter Property="BorderBrush" Value="{StaticResource CardEdgeBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="14,7" />
+        </Style>
+        <Style Selector="Button.link">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{StaticResource DimTextBrush}" />
+            <Setter Property="Padding" Value="6,3" />
+            <Setter Property="FontSize" Value="12" />
+        </Style>
+    </Application.Styles>
+</Application>

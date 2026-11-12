@@ -1,0 +1,56 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Nyakke.Views.SettingsWindow"
+        Icon="/Assets/nyakke.ico"
+        Title="Settings"
+        Width="700" SizeToContent="Height" CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource InkBrush}">
+    <StackPanel Margin="26,22" Spacing="12">
+        <TextBlock Text="NIKKE folder" FontWeight="SemiBold" />
+        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+            <TextBox x:Name="InstallBox" PlaceholderText="Found automatically when left empty" />
+            <Button x:Name="BrowseInstall" Grid.Column="1" Classes="ghost" Content="Browse…" />
+            <Button x:Name="DetectInstall" Grid.Column="2" Classes="ghost" Content="Find" />
+        </Grid>
+        <TextBlock x:Name="InstallNote" Foreground="{StaticResource DimTextBrush}" FontSize="12" TextWrapping="Wrap" />
+
+        <TextBlock Text="Starting" FontWeight="SemiBold" Margin="0,8,0,0" />
+        <StackPanel Orientation="Horizontal" Spacing="10">
+            <CheckBox x:Name="CloseBox" Content="Close the official launcher once the game is up, after" />
+            <NumericUpDown x:Name="DelayBox" Minimum="5" Maximum="600" Increment="5" FormatString="0" Width="130" />
+            <TextBlock Text="seconds" VerticalAlignment="Center" />
+        </StackPanel>
+        <CheckBox x:Name="CheckBox" Content="Check for known traces of the November 2026 compromise before each start" />
+        <CheckBox x:Name="WatchBox" Content="Watch the launcher's log folder while it is open and close it if a program appears there" />
+        <CheckBox x:Name="MinimizeBox" Content="Minimize this window while the game runs" />
+        <StackPanel Orientation="Horizontal" Spacing="10">
+            <TextBlock Text="Move the launcher's web cache aside" VerticalAlignment="Center" />
+            <ComboBox x:Name="CacheBox" Width="220">
+                <ComboBoxItem Content="Once (recommended)" />
+                <ComboBoxItem Content="At every start" />
+                <ComboBoxItem Content="Never" />
+            </ComboBox>
+        </StackPanel>
+        <CheckBox x:Name="DirectBox" Content="Experimental: start nikke.exe itself and skip the official launcher (the game may refuse to sign in)" />
+
+        <TextBlock Text="Look" FontWeight="SemiBold" Margin="0,8,0,0" />
+        <Grid ColumnDefinitions="150,*,Auto,Auto" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="8">
+            <TextBlock Text="Background picture" VerticalAlignment="Center" />
+            <TextBox x:Name="BackgroundBox" Grid.Column="1" PlaceholderText="None" />
+            <Button x:Name="BrowseBackground" Grid.Column="2" Classes="ghost" Content="Browse…" />
+            <Button x:Name="ClearBackground" Grid.Column="3" Classes="ghost" Content="Clear" />
+            <TextBlock Grid.Row="1" Text="Name" VerticalAlignment="Center" />
+            <TextBox x:Name="TitleBox" Grid.Row="1" Grid.Column="1" />
+            <TextBlock Grid.Row="2" Text="Daily reset (UTC)" VerticalAlignment="Center" />
+            <TextBox x:Name="ResetBox" Grid.Row="2" Grid.Column="1" PlaceholderText="20:00" />
+        </Grid>
+
+        <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8" Margin="0,12,0,0">
+            <Button x:Name="DataFolder" Classes="ghost" Content="Open Nyakke's data folder" />
+            <TextBlock x:Name="ErrorText" Grid.Column="1" Foreground="#FF7A86" VerticalAlignment="Center" TextWrapping="Wrap" />
+            <Button x:Name="CancelButton" Grid.Column="2" Classes="ghost" Content="Cancel" IsCancel="True" />
+            <Button x:Name="SaveButton" Grid.Column="3" Classes="ghost" Content="Save" IsDefault="True" />
+        </Grid>
+    </StackPanel>
+</Window>

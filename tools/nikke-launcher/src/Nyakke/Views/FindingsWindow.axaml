@@ -1,0 +1,35 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:core="using:Nyakke.Core"
+        x:Class="Nyakke.Views.FindingsWindow"
+        Icon="/Assets/nyakke.ico"
+        Width="680" SizeToContent="Height" MaxHeight="640" CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource InkBrush}">
+    <Grid RowDefinitions="Auto,Auto,*,Auto,Auto" Margin="26,22">
+        <TextBlock x:Name="Heading" FontSize="22" FontWeight="Bold" TextWrapping="Wrap" />
+        <TextBlock x:Name="Intro" Grid.Row="1" Margin="0,10,0,0" TextWrapping="Wrap" LineHeight="21" />
+        <ScrollViewer Grid.Row="2" Margin="0,14,0,0" MaxHeight="300">
+            <ItemsControl x:Name="List">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="core:Finding">
+                        <Border Classes="card" Margin="0,0,0,8" Padding="14,10">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{StaticResource DimTextBrush}" />
+                                <SelectableTextBlock Text="{Binding Path}" TextWrapping="Wrap" FontSize="12" FontFamily="Consolas,Menlo,monospace" />
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+        <WrapPanel x:Name="LinkPanel" Grid.Row="3" Margin="0,8,0,0" />
+        <StackPanel Grid.Row="4" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button x:Name="CopyButton" Classes="ghost" Content="Copy details" />
+            <Button x:Name="HandledButton" Classes="ghost" Content="I have dealt with these" />
+            <Button x:Name="StartButton" Classes="ghost" Content="Start anyway" />
+            <Button x:Name="CloseButton" Classes="ghost" Content="Close" IsDefault="True" IsCancel="True" />
+        </StackPanel>
+    </Grid>
+</Window>
